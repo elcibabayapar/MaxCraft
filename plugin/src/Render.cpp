@@ -122,6 +122,24 @@ namespace
     void*                                     g_atlas = nullptr;
     UINT                                      g_atlasW = 0, g_atlasH = 0;
     std::unordered_map<std::uint64_t, Section> g_sections;
+
+    // Minecraft's entities (mobs, primed TNT, particles...) as its own renderer posed them this frame:
+    // vertices relative to an origin, in batches by texture (0 = the block/item atlas, else an id
+    // from kRenTexture: mob skins and the like).
+    struct EntityTexture
+    {
+        void* texture = nullptr;
+        UINT  width = 0, height = 0;
+    };
+    std::unordered_map<std::uint32_t, EntityTexture> g_entityTextures;
+    struct SceneMesh
+    {
+        double                        origin[3]{};
+        std::vector<proto::RenBatch>  batches;
+        std::vector<struct Vertex>    vertices;
+    };
+    SceneMesh g_scene;
+    UINT      g_entityTrianglesDrawn = 0;
     void*                                     g_overlay = nullptr;
     UINT                                      g_overlayW = 0, g_overlayH = 0;
     bool                                      g_haveOverlay = false;
@@ -153,6 +171,11 @@ namespace
         g_overlay = nullptr;
         g_overlayW = g_overlayH = 0;
         g_haveOverlay = false;
+        for (auto& [id, t] : g_entityTextures)
+            Release(t.texture);
+        g_entityTextures.clear();
+        g_scene.batches.clear();
+        g_scene.vertices.clear();
     }
 
     // RGBA8 (red in the low byte) rows -> an A8R8G8B8 texture region.
@@ -295,9 +318,68 @@ namespace
             for (auto& [key, s] : g_sections)
                 ReleaseSection(s);
             g_sections.clear();
+            g_scene.batches.clear();
+            g_scene.vertices.clear();
             break;
+        case proto::kRenTexture:
+            {
+                if (bytes < sizeof(proto::RenTexture))
+                    return;
+                const auto* hdr = reinterpret_cast<const proto::RenTexture*>(data);
+                if (!hdr->width || !hdr->height || hdr->width > 4096 || hdr->height > 4096 ||
+                    bytes < sizeof(*hdr) + std::uint64_t(hdr->width) * hdr->height * 4)
+                    return;
+                auto& t = g_entityTextures[hdr->id];
+                if (!t.texture || t.width != hdr->width || t.height != hdr->height) {
+                    Release(t.texture);
+                    t.texture = CreateTexture(device, hdr->width, hdr->height);
+                    t.width = hdr->width;
+                    t.height = hdr->height;
+                }
+                if (t.texture)
+                    UploadRgba(t.texture, 0, 0, hdr->width, hdr->height, data + sizeof(*hdr), hdr->width * 4);
+                break;
+            }
+        case proto::kRenScene:
+            {
+                g_scene.batches.clear();
+                g_scene.vertices.clear();
+                if (bytes < sizeof(proto::RenScene))
+                    return;
+                const auto* hdr = reinterpret_cast<const proto::RenScene*>(data);
+                const std::uint64_t need = sizeof(*hdr) + std::uint64_t(hdr->batchCount) * sizeof(proto::RenBatch) +
+                                           std::uint64_t(hdr->vertexCount) * sizeof(proto::RenVertex);
+                if (!hdr->batchCount || !hdr->vertexCount || bytes < need)
+                    return;
+                g_scene.origin[0] = hdr->originX;
+                g_scene.origin[1] = hdr->originY;
+                g_scene.origin[2] = hdr->originZ;
+                const auto* batches = reinterpret_cast<const proto::RenBatch*>(data + sizeof(*hdr));
+                const auto* verts = reinterpret_cast<const proto::RenVertex*>(batches + hdr->batchCount);
+                g_scene.vertices.resize(hdr->vertexCount);
+                for (std::uint32_t b = 0; b < hdr->batchCount; ++b) {
+                    const auto& batch = batches[b];
+                    if (batch.first + batch.count > hdr->vertexCount || batch.count < 3)
+                        continue;
+                    const bool blended = (batch.flags & 1) != 0;
+                    for (std::uint32_t i = batch.first; i < batch.first + batch.count; ++i) {
+                        const auto& v = verts[i];
+                        DWORD       color = BakeColor(v.color, v.light, v.flags);
+                        if (blended)  // keep the vertex's own alpha (ghosts, slime, particles fading out)
+                            color = (color & 0x00FFFFFFu) | (v.color & 0xFF000000u);
+                        g_scene.vertices[i] = { v.x, v.y, v.z, color, v.u, v.v };
+                    }
+                    g_scene.batches.push_back(batch);
+                }
+                static bool logged = false;
+                if (!logged) {
+                    logged = true;
+                    mclog::Info("entities: first scene from Minecraft, {} triangles in {} batches", hdr->vertexCount / 3, hdr->batchCount);
+                }
+                break;
+            }
         default:
-            break;  // avatar, scene entities, lights, NPC solids, dug bits: not drawn in MP2 yet
+            break;  // avatar (MP2 shows Max), lights, NPC solids, dug bits: not drawn in MP2
         }
     }
 
@@ -373,6 +455,7 @@ namespace
     }
 
     Matrix Multiply(const Matrix& a, const Matrix& b);  // defined below, near its row-vector helpers
+    void   DrawEntities(void* device, const proto::WorldEntities* entities);  // defined below
 
     void XformPoint(const float p[3], const Matrix& m, float out[4])
     {
@@ -382,7 +465,7 @@ namespace
 
     void DrawWorld(void* device, const Runtime& st, UINT w, UINT h)
     {
-        if (!g_atlas || g_sections.empty() || !Mapping::Get().Calibrated())
+        if (!g_atlas || !Mapping::Get().Calibrated())
             return;
         // Our blocks live in MP2 world space and our eye is st.camera, so the view is built from it
         // directly. MP2's own view matrices are rotation-only (its scene rides on identity views with
@@ -489,9 +572,15 @@ namespace
         VCall<dev::SetRenderState>(device, UINT(kRsDestBlend), DWORD(kBlendInvSrcAlpha));
         drawPass(true);
 
-        // The targeted block's outline.
+        // Minecraft's entities: mobs, TNT, particles, arrows, dropped items.
         static proto::WorldEntities entities;
-        if (Link::Get().ReadWorldEntities(entities) && entities.hasSelection) {
+        const bool                  haveEntities = Link::Get().ReadWorldEntities(entities);
+        VCall<dev::SetRenderState>(device, UINT(kRsSrcBlend), DWORD(kBlendSrcAlpha));
+        VCall<dev::SetRenderState>(device, UINT(kRsDestBlend), DWORD(kBlendInvSrcAlpha));
+        DrawEntities(device, haveEntities ? &entities : nullptr);
+
+        // The targeted block's outline.
+        if (haveEntities && entities.hasSelection) {
             const float* lo = entities.selMin;
             const float* hi = entities.selMax;
             const float  e = 0.002f;
@@ -511,6 +600,181 @@ namespace
             VCall<dev::SetTextureStageState>(device, 0u, UINT(kTssAlphaOp), DWORD(kTopSelectArg1));
             VCall<dev::SetTextureStageState>(device, 0u, UINT(kTssAlphaArg1), DWORD(kTaDiffuse));
             VCall<dev::DrawPrimitiveUP>(device, UINT(kPtLineList), 12u, static_cast<const void*>(lines), UINT(sizeof(Vertex)));
+        }
+    }
+
+    // ---- Minecraft's entities ------------------------------------------------------------------
+    // A quad TL, TR, BR, BL with the atlas rect uv {u0, v0, u1, v1}, as two triangles.
+    void PushQuad(std::vector<Vertex>& out, const float p[4][3], const float uv[4], DWORD color = 0xFFFFFFFFu)
+    {
+        const Vertex v[4] = { { p[0][0], p[0][1], p[0][2], color, uv[0], uv[1] },
+                              { p[1][0], p[1][1], p[1][2], color, uv[2], uv[1] },
+                              { p[2][0], p[2][1], p[2][2], color, uv[2], uv[3] },
+                              { p[3][0], p[3][1], p[3][2], color, uv[0], uv[3] } };
+        for (int i : { 0, 1, 2, 0, 2, 3 })
+            out.push_back(v[i]);
+    }
+
+    // A box (dropped block, crack overlay), turned about the vertical by yaw.
+    void PushBox(std::vector<Vertex>& out, const float mn[3], const float size[3], float yaw, const float* side, const float* top,
+                 const float* bottom, bool shaded)
+    {
+        const float cx = mn[0] + size[0] * 0.5f, cz = mn[2] + size[2] * 0.5f;
+        const float c = std::cos(yaw), sn = std::sin(yaw);
+        auto        corner = [&](int i, float o[3]) {
+            const float lx = ((i & 1) ? 0.5f : -0.5f) * size[0], lz = ((i & 4) ? 0.5f : -0.5f) * size[2];
+            o[0] = cx + lx * c - lz * sn;
+            o[1] = mn[1] + ((i & 2) ? size[1] : 0.0f);
+            o[2] = cz + lx * sn + lz * c;
+        };
+        static constexpr int   kFaces[6][4] = { { 6, 7, 5, 4 }, { 3, 2, 0, 1 }, { 7, 3, 1, 5 }, { 2, 6, 4, 0 }, { 2, 3, 7, 6 }, { 4, 5, 1, 0 } };
+        static constexpr float kShade[6] = { 0.8f, 0.8f, 0.6f, 0.6f, 1.0f, 0.5f };
+        for (int f = 0; f < 6; ++f) {
+            float p[4][3];
+            for (int k = 0; k < 4; ++k)
+                corner(kFaces[f][k], p[k]);
+            const auto  level = static_cast<DWORD>(255.0f * (shaded ? kShade[f] : 1.0f));
+            const DWORD color = 0xFF000000u | (level << 16) | (level << 8) | level;
+            PushQuad(out, p, f == 4 ? top : f == 5 ? bottom : side, color);
+        }
+    }
+
+    // Minecraft's arrow model (two crossed fins and a back plate), smaller like SkyCraft draws it.
+    void PushArrow(std::vector<Vertex>& out, float px, float py, float pz, const float d[3], const float* uvSide, const float* uvBack)
+    {
+        float s[3] = { d[2], 0.0f, -d[0] };
+        float sl = std::sqrt(s[0] * s[0] + s[2] * s[2]);
+        if (sl < 1e-3f)
+            s[0] = 1.0f, s[2] = 0.0f, sl = 1.0f;
+        s[0] /= sl, s[2] /= sl;
+        const float     u[3] = { s[1] * d[2] - s[2] * d[1], s[2] * d[0] - s[0] * d[2], s[0] * d[1] - s[1] * d[0] };
+        constexpr float r = 0.70710678f;
+        const float     fins[2][3] = { { (u[0] + s[0]) * r, (u[1] + s[1]) * r, (u[2] + s[2]) * r }, { (u[0] - s[0]) * r, (u[1] - s[1]) * r, (u[2] - s[2]) * r } };
+        constexpr float k = 0.9f / 16.0f * 0.55f;
+        auto            at = [&](float along, const float* q, float side, const float* q2, float side2, float o[3]) {
+            const float base[3] = { px, py, pz };
+            for (int i = 0; i < 3; ++i)
+                o[i] = base[i] + d[i] * along + q[i] * side + (q2 ? q2[i] * side2 : 0.0f);
+        };
+        for (const auto& q : fins) {
+            float p[4][3];
+            at(-12 * k, q, -2 * k, nullptr, 0, p[0]);
+            at(4 * k, q, -2 * k, nullptr, 0, p[1]);
+            at(4 * k, q, 2 * k, nullptr, 0, p[2]);
+            at(-12 * k, q, 2 * k, nullptr, 0, p[3]);
+            PushQuad(out, p, uvSide);
+        }
+        float p[4][3];
+        at(-11 * k, fins[0], -2 * k, fins[1], -2 * k, p[0]);
+        at(-11 * k, fins[0], 2 * k, fins[1], -2 * k, p[1]);
+        at(-11 * k, fins[0], 2 * k, fins[1], 2 * k, p[2]);
+        at(-11 * k, fins[0], -2 * k, fins[1], 2 * k, p[3]);
+        PushQuad(out, p, uvBack);
+    }
+
+    // Arrows, dropped items and blocks, block-breaking cracks: built from Minecraft's entity list,
+    // in absolute Minecraft coordinates. Cracks go to `cracks` (blended, drawn last).
+    void BuildWorldEntities(const proto::WorldEntities& entities, std::vector<Vertex>& solid, std::vector<Vertex>& cracks)
+    {
+        constexpr float kPi = 3.14159265f;
+        for (std::uint32_t i = 0; i < entities.count; ++i) {
+            const auto& e = entities.entities[i];
+            switch (e.kind) {
+            case proto::kWeArrow:
+            case proto::kWeTrident:
+                {
+                    const float yaw = e.yaw * kPi / 180.0f, pitch = e.pitch * kPi / 180.0f;
+                    const float d[3] = { std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch) };
+                    PushArrow(solid, e.x, e.y, e.z, d, e.uv[0], e.uv[e.kind == proto::kWeArrow ? 1 : 0]);
+                    break;
+                }
+            case proto::kWeItem:
+                {
+                    const float spin = e.yaw * kPi / 180.0f, half = e.scale * 0.5f;
+                    const float rx = std::cos(spin) * half, rz = std::sin(spin) * half;
+                    const float p[4][3] = { { e.x - rx, e.y + half, e.z - rz },
+                                            { e.x + rx, e.y + half, e.z + rz },
+                                            { e.x + rx, e.y - half, e.z + rz },
+                                            { e.x - rx, e.y - half, e.z - rz } };
+                    PushQuad(solid, p, e.uv[0]);
+                    break;
+                }
+            case proto::kWeBlock:
+                {
+                    const float sz = e.scale;
+                    const float mn[3] = { e.x - sz * 0.5f, e.y - sz * 0.5f, e.z - sz * 0.5f };
+                    const float size[3] = { sz, sz, sz };
+                    PushBox(solid, mn, size, e.yaw * kPi / 180.0f, e.uv[0], e.uv[1], e.uv[2], true);
+                    break;
+                }
+            case proto::kWeCrack:
+                {
+                    const float mn[3] = { e.x, e.y, e.z };
+                    PushBox(cracks, mn, e.ext, 0.0f, e.uv[0], e.uv[0], e.uv[0], false);
+                    break;
+                }
+            default:
+                break;  // contact shadows: not drawn
+            }
+        }
+    }
+
+    void DrawEntities(void* device, const proto::WorldEntities* entities)
+    {
+        auto&  map = Mapping::Get();
+        Matrix world{};
+
+        // Mobs, primed TNT, particles: solid batches, then blended ones.
+        if (!g_scene.batches.empty()) {
+            map.McToMp2Matrix(g_scene.origin[0], g_scene.origin[1], g_scene.origin[2], world.m);
+            VCall<dev::SetTransform>(device, UINT(kTsWorld), static_cast<const Matrix*>(&world));
+            for (int pass = 0; pass < 2; ++pass) {
+                const bool blended = pass == 1;
+                VCall<dev::SetRenderState>(device, UINT(kRsZWriteEnable), blended ? DWORD(FALSE) : DWORD(TRUE));
+                VCall<dev::SetRenderState>(device, UINT(kRsAlphaTestEnable), blended ? DWORD(FALSE) : DWORD(TRUE));
+                VCall<dev::SetRenderState>(device, UINT(kRsAlphaBlendEnable), blended ? DWORD(TRUE) : DWORD(FALSE));
+                for (const auto& b : g_scene.batches) {
+                    if (((b.flags & 1) != 0) != blended)
+                        continue;
+                    void* texture = g_atlas;
+                    if (b.texture != 0) {
+                        const auto it = g_entityTextures.find(b.texture);
+                        if (it == g_entityTextures.end() || !it->second.texture)
+                            continue;
+                        texture = it->second.texture;
+                    }
+                    VCall<dev::SetTexture>(device, 0u, texture);
+                    Checked(VCall<dev::DrawPrimitiveUP>(device, UINT(kPtTriangleList), b.count / 3, static_cast<const void*>(&g_scene.vertices[b.first]),
+                                                        UINT(sizeof(Vertex))));
+                    g_entityTrianglesDrawn += b.count / 3;
+                }
+            }
+        }
+
+        // Arrows, dropped items and blocks, cracks.
+        if (entities && entities->count) {
+            static std::vector<Vertex> solid, cracks;
+            solid.clear();
+            cracks.clear();
+            BuildWorldEntities(*entities, solid, cracks);
+            map.McToMp2Matrix(0.0, 0.0, 0.0, world.m);
+            VCall<dev::SetTransform>(device, UINT(kTsWorld), static_cast<const Matrix*>(&world));
+            VCall<dev::SetTexture>(device, 0u, g_atlas);
+            if (solid.size() >= 3) {
+                VCall<dev::SetRenderState>(device, UINT(kRsZWriteEnable), DWORD(TRUE));
+                VCall<dev::SetRenderState>(device, UINT(kRsAlphaTestEnable), DWORD(TRUE));
+                VCall<dev::SetRenderState>(device, UINT(kRsAlphaBlendEnable), DWORD(FALSE));
+                Checked(VCall<dev::DrawPrimitiveUP>(device, UINT(kPtTriangleList), static_cast<UINT>(solid.size() / 3), static_cast<const void*>(solid.data()),
+                                                    UINT(sizeof(Vertex))));
+                g_entityTrianglesDrawn += static_cast<UINT>(solid.size() / 3);
+            }
+            if (cracks.size() >= 3) {
+                VCall<dev::SetRenderState>(device, UINT(kRsZWriteEnable), DWORD(FALSE));
+                VCall<dev::SetRenderState>(device, UINT(kRsAlphaTestEnable), DWORD(FALSE));
+                VCall<dev::SetRenderState>(device, UINT(kRsAlphaBlendEnable), DWORD(TRUE));
+                Checked(VCall<dev::DrawPrimitiveUP>(device, UINT(kPtTriangleList), static_cast<UINT>(cracks.size() / 3), static_cast<const void*>(cracks.data()),
+                                                    UINT(sizeof(Vertex))));
+            }
         }
     }
 
@@ -733,13 +997,14 @@ namespace
         if (GetTickCount() - lastLog > 5000) {
             lastLog = GetTickCount();
             mclog::Info("render: view set {} times, replaced {}, world matrices moved {}; scene projection {}; {} block sections, {} block "
-                        "triangles drawn (frames drawn before depth clear {}, at scene end {}, at present {}), atlas {}, scene z mode {}, "
+                        "triangles drawn (frames drawn before depth clear {}, at scene end {}, at present {}), {} entity triangles, {} entity "
+                        "textures, atlas {}, scene z mode {}, "
                         "shader constants moved {}, our draw failures {}",
                         g_viewSets, g_viewReplaced, g_worldCorrected, g_haveProj ? "seen" : "not seen", g_sections.size(), g_trianglesDrawn,
-                        g_drawnAtClear, g_drawnAtEndScene, g_drawnAtPresent,
+                        g_drawnAtClear, g_drawnAtEndScene, g_drawnAtPresent, g_entityTrianglesDrawn, g_entityTextures.size(),
                         g_atlas ? "yes" : "no", g_sceneZEnable, g_constantsMoved, g_drawFailures);
             g_viewSets = g_viewReplaced = g_worldCorrected = g_trianglesDrawn = g_constantsMoved = g_drawFailures = 0;
-            g_drawnAtClear = g_drawnAtEndScene = g_drawnAtPresent = 0;
+            g_drawnAtClear = g_drawnAtEndScene = g_drawnAtPresent = g_entityTrianglesDrawn = 0;
         }
         g_haveView = g_haveProj = false;  // MP2 sets them again each frame
         g_frameSceneDraws = 0;

@@ -19,7 +19,7 @@ namespace
     {
         mclog::Init();
         crashlog::Install();
-        mclog::Info("MaxCraft 0.1.0 loaded (protocol v{})", proto::kVersion);
+        mclog::Info("MaxCraft 0.1.1 loaded (protocol v{}, built {} {})", proto::kVersion, __DATE__, __TIME__);
 
         if (!mp2::Resolve()) {
             mclog::Info("unsupported Max Payne 2 version: MaxCraft stays inactive");

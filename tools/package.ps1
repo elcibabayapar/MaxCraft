@@ -11,7 +11,7 @@
 param(
     [switch]$NoBuild,
     [string]$SkyCraftVersion = "0.1.2",
-    [string]$Version = "0.1.0"
+    [string]$Version = "0.1.1"
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot

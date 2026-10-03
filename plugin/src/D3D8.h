@@ -125,6 +125,7 @@ namespace d3d8
         constexpr int DrawPrimitive = 70;
         constexpr int DrawPrimitiveUP = 72;
         constexpr int SetVertexShader = 76;
+        constexpr int SetVertexShaderConstant = 79;
         constexpr int SetStreamSource = 83;
         constexpr int SetPixelShader = 88;
     }

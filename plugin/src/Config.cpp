@@ -64,6 +64,7 @@ const Config& Config::Get()
         c.quickSaveKey = ReadInt(ini, L"Controls", L"iQuickSaveKey", c.quickSaveKey);
 
         c.diagnostics = ReadInt(ini, L"Debug", L"bDiagnostics", 0) != 0;
+        c.blocksNoDepth = ReadInt(ini, L"Debug", L"bBlocksNoDepth", 0) != 0;
         return c;
     }();
     return config;

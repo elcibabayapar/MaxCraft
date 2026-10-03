@@ -35,6 +35,11 @@ namespace
     UINT   g_trianglesDrawn = 0;
     bool   g_ownDraw = false;  // our own SetTransform / SetRenderState calls pass straight through
     bool   g_perspectiveActive = false;
+    // For vertex-shader draws (skinned characters): MP2's projection, its inverse, and the camera
+    // correction inverse(mp2View) * ourView of this frame.
+    Matrix g_mp2Proj{}, g_mp2ProjInverse{}, g_correction{};
+    bool   g_haveProjInverse = false, g_haveCorrection = false;
+    UINT   g_constantsMoved = 0;
 
     struct Vertex
     {
@@ -212,6 +217,13 @@ namespace
                 section.translucent = CreateVb(device, translucent);
                 section.translucentCount = section.translucent ? static_cast<UINT>(translucent.size()) : 0;
                 g_sections[key] = section;
+                {
+                    const mp2::Vec3 origin = Mapping::Get().ToMp2(s->sx * 16.0, s->sy * 16.0, s->sz * 16.0);
+                    const auto&     eye = State().camera.row[3];
+                    mclog::Info("blocks: section ({}, {}, {}) {} verts -> MP2 ({:.1f}, {:.1f}, {:.1f}); eye at ({:.1f}, {:.1f}, {:.1f}); first vertex ({:.2f}, {:.2f}, {:.2f}) colour {:08x}",
+                                s->sx, s->sy, s->sz, s->vertexCount, origin.x, origin.y, origin.z, eye.x, eye.y, eye.z, verts[0].x, verts[0].y, verts[0].z,
+                                verts[0].color);
+                }
                 break;
             }
         case proto::kRenClearAll:
@@ -295,7 +307,7 @@ namespace
         VCall<dev::SetTransform>(device, UINT(kTsProjection), static_cast<const Matrix*>(&proj));
         SetCommonStates(device);
         VCall<dev::SetTexture>(device, 0u, g_atlas);
-        VCall<dev::SetRenderState>(device, UINT(kRsZEnable), g_sceneZEnable ? g_sceneZEnable : DWORD(TRUE));
+        VCall<dev::SetRenderState>(device, UINT(kRsZEnable), Config::Get().blocksNoDepth ? DWORD(FALSE) : (g_sceneZEnable ? g_sceneZEnable : DWORD(TRUE)));
         VCall<dev::SetRenderState>(device, UINT(kRsZFunc), DWORD(kCmpLessEqual));
 
         auto&  map = Mapping::Get();
@@ -476,10 +488,10 @@ namespace
         if (GetTickCount() - lastLog > 5000) {
             lastLog = GetTickCount();
             mclog::Info("render: view set {} times, replaced {}, world matrices moved {}; scene projection {}; {} block sections, {} block "
-                        "triangles drawn, atlas {}, scene z mode {}",
+                        "triangles drawn, atlas {}, scene z mode {}, shader constants moved {}",
                         g_viewSets, g_viewReplaced, g_worldCorrected, g_haveProj ? "seen" : "not seen", g_sections.size(), g_trianglesDrawn,
-                        g_atlas ? "yes" : "no", g_sceneZEnable);
-            g_viewSets = g_viewReplaced = g_worldCorrected = g_trianglesDrawn = 0;
+                        g_atlas ? "yes" : "no", g_sceneZEnable, g_constantsMoved);
+            g_viewSets = g_viewReplaced = g_worldCorrected = g_trianglesDrawn = g_constantsMoved = 0;
         }
         g_haveView = g_haveProj = false;  // MP2 sets them again each frame
         return g_origPresent(device, src, dst, window, dirty);
@@ -536,6 +548,92 @@ namespace
         return g_origSetRenderState(device, state, value);
     }
 
+    bool Inverse4(const Matrix& a, Matrix& out)
+    {
+        float m[4][8];
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j) {
+                m[i][j] = a.m[i][j];
+                m[i][j + 4] = i == j ? 1.0f : 0.0f;
+            }
+        for (int c = 0; c < 4; ++c) {
+            int pivot = c;
+            for (int r = c + 1; r < 4; ++r)
+                if (std::fabs(m[r][c]) > std::fabs(m[pivot][c]))
+                    pivot = r;
+            if (std::fabs(m[pivot][c]) < 1e-12f)
+                return false;
+            for (int j = 0; j < 8; ++j)
+                std::swap(m[c][j], m[pivot][j]);
+            const float inv = 1.0f / m[c][c];
+            for (int j = 0; j < 8; ++j)
+                m[c][j] *= inv;
+            for (int r = 0; r < 4; ++r)
+                if (r != c) {
+                    const float f = m[r][c];
+                    for (int j = 0; j < 8; ++j)
+                        m[r][j] -= f * m[c][j];
+                }
+        }
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                out.m[i][j] = m[i][j + 4];
+        return true;
+    }
+
+    Matrix Transpose(const Matrix& a)
+    {
+        Matrix r{};
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                r.m[i][j] = a.m[j][i];
+        return r;
+    }
+
+    // M = world * view * proj  =>  M * inverse(proj) is affine (last column 0, 0, 0, 1).
+    bool LooksLikeWorldViewProj(const Matrix& m, Matrix& worldView)
+    {
+        worldView = Multiply(m, g_mp2ProjInverse);
+        return std::fabs(worldView.m[0][3]) < 1e-3f && std::fabs(worldView.m[1][3]) < 1e-3f && std::fabs(worldView.m[2][3]) < 1e-3f &&
+               std::fabs(worldView.m[3][3] - 1.0f) < 1e-3f;
+    }
+
+    using SetVsConstantFn = HRESULT(__stdcall*)(void*, DWORD, const void*, DWORD);
+    SetVsConstantFn g_origSetVsConstant = nullptr;
+
+    HRESULT __stdcall SetVertexShaderConstant(void* device, DWORD reg, const void* data, DWORD count)
+    {
+        const Runtime& st = State();
+        if (g_ownDraw || !data || count < 4 || count > 96 || !st.cameraValid || !g_haveCorrection || !g_haveProjInverse)
+            return g_origSetVsConstant(device, reg, data, count);
+        static float buffer[96 * 4];
+        std::memcpy(buffer, data, count * 16);
+        bool changed = false;
+        for (DWORD i = 0; i + 4 <= count;) {
+            Matrix regs{};
+            std::memcpy(regs.m, buffer + i * 4, 64);
+            Matrix worldView{};
+            // Shaders usually get the matrix transposed (one row per register); try both.
+            const Matrix asRows = Transpose(regs);
+            if (LooksLikeWorldViewProj(asRows, worldView)) {
+                const Matrix fixed = Transpose(Multiply(Multiply(worldView, g_correction), g_mp2Proj));
+                std::memcpy(buffer + i * 4, fixed.m, 64);
+                changed = true;
+                i += 4;
+            } else if (LooksLikeWorldViewProj(regs, worldView)) {
+                const Matrix fixed = Multiply(Multiply(worldView, g_correction), g_mp2Proj);
+                std::memcpy(buffer + i * 4, fixed.m, 64);
+                changed = true;
+                i += 4;
+            } else {
+                ++i;
+            }
+        }
+        if (changed)
+            ++g_constantsMoved;
+        return g_origSetVsConstant(device, reg, changed ? buffer : data, count);
+    }
+
     HRESULT __stdcall SetTransform(void* device, UINT state, const Matrix* matrix)
     {
         if (g_ownDraw || !matrix)
@@ -560,6 +658,8 @@ namespace
                 ComputeCamera(st, ours, unusedProj, 16, 9);
                 correction = Multiply(RigidInverse(*matrix), ours);
                 haveCorrection = true;
+                g_correction = correction;
+                g_haveCorrection = true;
                 matrix = &ours;
                 ++g_viewReplaced;
             }
@@ -569,7 +669,7 @@ namespace
             ++g_worldCorrected;
         }
         if (!st.cameraValid)
-            haveCorrection = false;
+            haveCorrection = g_haveCorrection = false;
 
         if (state == kTsView) {
             pendingView = *matrix;
@@ -580,6 +680,10 @@ namespace
         } else if (state == kTsProjection) {
             perspective = matrix->m[2][3] != 0.0f && matrix->m[3][3] == 0.0f;
             g_perspectiveActive = perspective;
+            if (perspective && std::memcmp(&g_mp2Proj, matrix, sizeof(Matrix)) != 0) {
+                g_mp2Proj = *matrix;
+                g_haveProjInverse = Inverse4(g_mp2Proj, g_mp2ProjInverse);
+            }
             if (perspective) {
                 g_proj = *matrix;
                 g_view = pendingView;
@@ -611,6 +715,8 @@ namespace
             InstallHook(VSlot(device, dev::Reset), reinterpret_cast<void*>(&Reset), g_origReset, "IDirect3DDevice8::Reset");
             InstallHook(VSlot(device, dev::SetTransform), reinterpret_cast<void*>(&SetTransform), g_origSetTransform, "IDirect3DDevice8::SetTransform");
             InstallHook(VSlot(device, dev::SetRenderState), reinterpret_cast<void*>(&SetRenderState), g_origSetRenderState, "IDirect3DDevice8::SetRenderState");
+            InstallHook(VSlot(device, dev::SetVertexShaderConstant), reinterpret_cast<void*>(&SetVertexShaderConstant), g_origSetVsConstant,
+                        "IDirect3DDevice8::SetVertexShaderConstant");
         }
         return hr;
     }

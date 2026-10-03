@@ -295,7 +295,13 @@ namespace
 
         // Minecraft link state.
         const bool mcAlive = link.McAlive();
-        st.haveMc = mcAlive && link.ReadMcState(st.mc);
+        static DWORD lastMcRead = 0;
+        proto::McState fresh{};
+        if (mcAlive && link.ReadMcState(fresh)) {
+            st.mc = fresh;
+            lastMcRead = nowTick;
+        }
+        st.haveMc = mcAlive && lastMcRead && nowTick - lastMcRead < 1000;
         const auto mcPid = link.McPid();
         if (mcAlive && (!g_mcWasAlive || (mcPid != 0 && mcPid != g_lastMcPid))) {
             mclog::Info("Minecraft connected (pid {})", mcPid);

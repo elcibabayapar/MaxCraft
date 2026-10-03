@@ -28,6 +28,7 @@ struct Config
 
     // [Debug]
     bool diagnostics = false;
+    bool blocksNoDepth = false;  // [Debug] bBlocksNoDepth: draw Minecraft's blocks over everything
 
     static const Config& Get();
     static std::wstring GameDir();

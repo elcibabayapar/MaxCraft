@@ -838,6 +838,12 @@ namespace
                 g_view = *matrix;
                 g_haveView = true;
             }
+            // Also capture views set before the projection (or after it, which MP2 does): the eye
+            // translation is what our blocks need, and identity views (the UI) must not provide it.
+            if (!viewIsIdentity) {
+                g_view = *matrix;
+                g_haveView = true;
+            }
         } else if (state == kTsProjection) {
             perspective = matrix->m[2][3] != 0.0f && matrix->m[3][3] == 0.0f;
             g_perspectiveActive = perspective;

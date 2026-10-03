@@ -452,16 +452,26 @@ namespace
         const bool  stale = known == g_chars.end() || GetTickCount() - known->second.lastSeen > kStaleMs;
         const auto  target = reinterpret_cast<std::uintptr_t>(camera::Target());
         const auto  me = reinterpret_cast<std::uintptr_t>(self);
-        const bool  followed = target && target >= me && target - me < 0x4000;
-        if (self != st.player) {
-            const std::string& name = g_chars[self].name;
+        // The camera target sits right next to its own character (+0xdc); anything within 64 KB
+        // matched other characters' allocations in busy saves, which made the pick flicker.
+        const bool  followed = target && target >= me && target - me < 0x1000;
+        // While Minecraft drives the player the pick is frozen: switching characters here teleports
+        // Max around (and reads the wrong character's feet), which resyncs Minecraft forever.
+        if (self != st.player && !st.minecraftOwnsPlayer) {
+            const auto&        name = g_chars[self].name;
             const bool         named = (name.find("MaxPayne") != std::string::npos || name.find("Mona") != std::string::npos) &&
                                name.find("Enemy") == std::string::npos;
+            const bool currentNamed = known != g_chars.end() &&
+                                      (known->second.name.find("MaxPayne") != std::string::npos ||
+                                       (known->second.name.find("Mona") != std::string::npos && known->second.name.find("Enemy") == std::string::npos));
+            const bool maySteal = stale || (named && !currentNamed);
             if (followed && !camera::PathActive()) {
-                st.player = self;
-                g_playerByCamera = true;
-                mclog::Info("player is #{} ({}): MP2's camera follows it (+{:#x})", g_chars[self].id, name, target - me);
-            } else if (!g_playerByCamera && (stale || (named && !g_playerNamed)) && IsPlayerCandidate(self)) {
+                if (maySteal) {
+                    st.player = self;
+                    g_playerByCamera = true;
+                    mclog::Info("player is #{} ({}): MP2's camera follows it (+{:#x})", g_chars[self].id, name, target - me);
+                }
+            } else if (!g_playerByCamera && maySteal && IsPlayerCandidate(self)) {
                 st.player = self;
                 g_playerNamed = named;
                 mclog::Info("player is #{} ({}): input-driven, AI off", g_chars[self].id, name);

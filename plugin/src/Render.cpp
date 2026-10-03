@@ -23,9 +23,13 @@ namespace
     using PresentFn = HRESULT(__stdcall*)(void*, const RECT*, const RECT*, HWND, const void*);
     using ResetFn = HRESULT(__stdcall*)(void*, PresentParameters*);
     using SetTransformFn = HRESULT(__stdcall*)(void*, UINT, const Matrix*);
+    using BeginSceneFn = HRESULT(__stdcall*)(void*);
+    using EndSceneFn = HRESULT(__stdcall*)(void*);
     PresentFn      g_origPresent = nullptr;
     ResetFn        g_origReset = nullptr;
     SetTransformFn g_origSetTransform = nullptr;
+    BeginSceneFn   g_origBeginScene = nullptr;
+    EndSceneFn     g_origEndScene = nullptr;
 
     // MP2's own camera matrices, as it last set them: our blocks use exactly the same ones, so they
     // line up with its picture and depth buffer.
@@ -41,6 +45,12 @@ namespace
     Matrix g_mp2Proj{}, g_mp2ProjInverse{}, g_correction{};
     bool   g_haveProjInverse = false, g_haveCorrection = false;
     UINT   g_constantsMoved = 0;
+    // Whether this scene (BeginScene..EndScene) saw a perspective projection: MP2's 3D world does,
+    // its HUD scenes do not. Blocks drawn at EndScene only after a 3D scene.
+    bool g_sceneHadPerspective = false;
+    // Per 5 s, for the log: our own draw calls that failed, and the last failure code.
+    UINT g_drawFailures = 0;
+    HRESULT g_lastDrawFailure = 0;
 
     struct Vertex
     {
@@ -65,6 +75,8 @@ namespace
         UINT  solidCount = 0;   // vertices
         void* translucent = nullptr;
         UINT  translucentCount = 0;
+        float probeU = 0, probeV = 0;  // first vertex's atlas UV: what our texture probe samples
+        float probeX = 0, probeY = 0, probeZ = 0;  // first vertex, MC blocks relative to the section
     };
 
     void*                                     g_device = nullptr;  // the device our resources belong to
@@ -109,8 +121,10 @@ namespace
     {
         LockedRect locked{};
         RECT       rect{ static_cast<LONG>(x), static_cast<LONG>(y), static_cast<LONG>(x + w), static_cast<LONG>(y + h) };
-        if (FAILED((VCall<tex::LockRect>(texture, 0u, &locked, &rect, DWORD(0)))))
+        if (const HRESULT hr = VCall<tex::LockRect>(texture, 0u, &locked, &rect, DWORD(0)); FAILED(hr)) {
+            mclog::Info("texture: lock {}x{}+{}x{} failed ({:08x})", x, y, w, h, static_cast<unsigned>(hr));
             return;
+        }
         for (UINT row = 0; row < h; ++row) {
             const auto* src = reinterpret_cast<const std::uint32_t*>(rgba + std::size_t(flipRows ? h - 1 - row : row) * srcPitch);
             auto*       dst = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(locked.pBits) + std::size_t(row) * locked.Pitch);
@@ -125,8 +139,10 @@ namespace
     void* CreateTexture(void* device, UINT w, UINT h)
     {
         void* texture = nullptr;
-        if (FAILED((VCall<dev::CreateTexture>(device, w, h, 1u, DWORD(0), UINT(kFmtA8R8G8B8), UINT(kPoolManaged), &texture))))
+        if (const HRESULT hr = VCall<dev::CreateTexture>(device, w, h, 1u, DWORD(0), UINT(kFmtA8R8G8B8), UINT(kPoolManaged), &texture); FAILED(hr)) {
+            mclog::Info("texture: create {}x{} failed ({:08x})", w, h, static_cast<unsigned>(hr));
             return nullptr;
+        }
         return texture;
     }
 
@@ -136,13 +152,17 @@ namespace
             return nullptr;
         void*      vb = nullptr;
         const UINT bytes = static_cast<UINT>(vertices.size() * sizeof(Vertex));
-        if (FAILED((VCall<dev::CreateVertexBuffer>(device, bytes, DWORD(kUsageWriteOnly), kFvf, UINT(kPoolManaged), &vb))))
+        if (const HRESULT hr = VCall<dev::CreateVertexBuffer>(device, bytes, DWORD(kUsageWriteOnly), kFvf, UINT(kPoolManaged), &vb); FAILED(hr)) {
+            mclog::Info("vertex buffer: create {} bytes failed ({:08x})", bytes, static_cast<unsigned>(hr));
             return nullptr;
-        BYTE* data = nullptr;
-        if (SUCCEEDED((VCall<vb::Lock>(vb, 0u, bytes, &data, DWORD(0))))) {
-            std::memcpy(data, vertices.data(), bytes);
-            VCall<vb::Unlock>(vb);
         }
+        BYTE* data = nullptr;
+        if (const HRESULT hr = VCall<vb::Lock>(vb, 0u, bytes, &data, DWORD(0)); FAILED(hr)) {
+            mclog::Info("vertex buffer: lock {} bytes failed ({:08x})", bytes, static_cast<unsigned>(hr));
+            return vb;  // filled with garbage: blocks will look wrong, the log says why
+        }
+        std::memcpy(data, vertices.data(), bytes);
+        VCall<vb::Unlock>(vb);
         return vb;
     }
 
@@ -213,6 +233,11 @@ namespace
                     }
                 }
                 Section section{ s->sx, s->sy, s->sz };
+                section.probeX = solid.empty() ? verts[0].x : solid[0].x;
+                section.probeY = solid.empty() ? verts[0].y : solid[0].y;
+                section.probeZ = solid.empty() ? verts[0].z : solid[0].z;
+                section.probeU = solid.empty() ? verts[0].u : solid[0].u;
+                section.probeV = solid.empty() ? verts[0].v : solid[0].v;
                 section.solid = CreateVb(device, solid);
                 section.solidCount = section.solid ? static_cast<UINT>(solid.size()) : 0;
                 section.translucent = CreateVb(device, translucent);
@@ -297,17 +322,84 @@ namespace
         proj.m[3][2] = -zn * zf / (zf - zn);
     }
 
+    void Checked(HRESULT hr)
+    {
+        if (SUCCEEDED(hr))
+            return;
+        if (!g_drawFailures) {
+            g_lastDrawFailure = hr;
+            mclog::Info("blocks: our draw call failed ({:08x})", static_cast<unsigned>(hr));
+        }
+        ++g_drawFailures;
+    }
+
+    Matrix Multiply(const Matrix& a, const Matrix& b);  // defined below, near its row-vector helpers
+
+    void XformPoint(const float p[3], const Matrix& m, float out[4])
+    {
+        for (int j = 0; j < 4; ++j)
+            out[j] = p[0] * m.m[0][j] + p[1] * m.m[1][j] + p[2] * m.m[2][j] + m.m[3][j];
+    }
+
     void DrawWorld(void* device, const Runtime& st, UINT w, UINT h)
     {
         if (!g_atlas || g_sections.empty() || !Mapping::Get().Calibrated())
             return;
         Matrix view = g_view, proj = g_proj;
-        if (!g_haveView || !g_haveProj)
+        const bool gameView = g_haveView && g_haveProj;
+        if (!gameView)
             ComputeCamera(st, view, proj, w, h);
+
+        // Where does the first block vertex actually land on the screen? Decides between "wrong
+        // matrices" (off screen) and "pixels discarded" (on screen but invisible).
+        static DWORD lastProbe = 0;
+        const bool   probe = GetTickCount() - lastProbe > 5000;
+        if (probe) {
+            lastProbe = GetTickCount();
+            const Section* first = nullptr;
+            for (const auto& [key, s] : g_sections)
+                if (s.solidCount >= 3) {
+                    first = &s;
+                    break;
+                }
+            if (first) {
+                Matrix world{}, worldViewProj = Multiply(view, proj);
+                Mapping::Get().McToMp2Matrix(first->sx * 16.0, first->sy * 16.0, first->sz * 16.0, world.m);
+                worldViewProj = Multiply(world, worldViewProj);
+                const float   p[3] = { first->probeX, first->probeY, first->probeZ };
+                float         worldPos[4]{}, clip[4]{};
+                XformPoint(p, world, worldPos);
+                XformPoint(p, worldViewProj, clip);
+                const float cw = clip[3] != 0.0f ? clip[3] : 1e-6f;
+                mclog::Info("blocks probe: vertex world ({:.1f}, {:.1f}, {:.1f}) -> ndc ({:.2f}, {:.2f}, {:.3f}) w {:.1f} -> screen ({:.0f}, {:.0f}) of {}x{}; "
+                            "{} view, view last row ({:.1f} {:.1f} {:.1f}), proj {:.2f}/{:.2f}, z {}{}",
+                            worldPos[0], worldPos[1], worldPos[2], clip[0] / cw, clip[1] / cw, clip[2] / cw, clip[3], (clip[0] / cw * 0.5f + 0.5f) * w,
+                            (0.5f - clip[1] / cw * 0.5f) * h, w, h, gameView ? "game" : "fallback", view.m[3][0], view.m[3][1], view.m[3][2], proj.m[0][0],
+                            proj.m[1][1], g_sceneZEnable, Config::Get().blocksNoDepth ? ", depth off" : "");
+                // What does the atlas hold at that vertex's UV? (A8R8G8B8, read back as AARRGGBB.)
+                const UINT tx = (std::min)(static_cast<UINT>(first->probeU * g_atlasW), g_atlasW - 1);
+                const UINT ty = (std::min)(static_cast<UINT>(first->probeV * g_atlasH), g_atlasH - 1);
+                LockedRect locked{};
+                RECT       rect{ static_cast<LONG>(tx), static_cast<LONG>(ty), static_cast<LONG>(tx + 1), static_cast<LONG>(ty + 1) };
+                if (SUCCEEDED(VCall<tex::LockRect>(g_atlas, 0u, &locked, &rect, DWORD(0)))) {
+                    const std::uint32_t texel = *reinterpret_cast<const std::uint32_t*>(locked.pBits);
+                    VCall<tex::UnlockRect>(g_atlas, 0u);
+                    mclog::Info("blocks probe: atlas texel ({}, {}) for uv ({:.3f}, {:.3f}) = {:08x} AARRGGBB", tx, ty, first->probeU, first->probeV, texel);
+                }
+            }
+        }
+
         VCall<dev::SetTransform>(device, UINT(kTsView), static_cast<const Matrix*>(&view));
         VCall<dev::SetTransform>(device, UINT(kTsProjection), static_cast<const Matrix*>(&proj));
         SetCommonStates(device);
-        VCall<dev::SetTexture>(device, 0u, g_atlas);
+        const bool untextured = Config::Get().blocksNoTexture;
+        VCall<dev::SetTexture>(device, 0u, untextured ? static_cast<void*>(nullptr) : g_atlas);
+        if (untextured) {  // no texture, no alpha test: pure vertex colour — isolates texture problems
+            VCall<dev::SetTextureStageState>(device, 0u, UINT(kTssColorOp), DWORD(kTopSelectArg1));
+            VCall<dev::SetTextureStageState>(device, 0u, UINT(kTssColorArg1), DWORD(kTaDiffuse));
+            VCall<dev::SetTextureStageState>(device, 0u, UINT(kTssAlphaOp), DWORD(kTopSelectArg1));
+            VCall<dev::SetTextureStageState>(device, 0u, UINT(kTssAlphaArg1), DWORD(kTaDiffuse));
+        }
         VCall<dev::SetRenderState>(device, UINT(kRsZEnable), Config::Get().blocksNoDepth ? DWORD(FALSE) : (g_sceneZEnable ? g_sceneZEnable : DWORD(TRUE)));
         VCall<dev::SetRenderState>(device, UINT(kRsZFunc), DWORD(kCmpLessEqual));
 
@@ -321,8 +413,8 @@ namespace
                     continue;
                 map.McToMp2Matrix(s.sx * 16.0, s.sy * 16.0, s.sz * 16.0, world.m);
                 VCall<dev::SetTransform>(device, UINT(kTsWorld), static_cast<const Matrix*>(&world));
-                VCall<dev::SetStreamSource>(device, 0u, vb, UINT(sizeof(Vertex)));
-                VCall<dev::DrawPrimitive>(device, UINT(kPtTriangleList), 0u, count / 3);
+                Checked(VCall<dev::SetStreamSource>(device, 0u, vb, UINT(sizeof(Vertex))));
+                Checked(VCall<dev::DrawPrimitive>(device, UINT(kPtTriangleList), 0u, count / 3));
                 g_trianglesDrawn += count / 3;
             }
         };
@@ -330,7 +422,7 @@ namespace
         // Solid and cutout blocks (leaves, glass panes, flowers: alpha tested).
         VCall<dev::SetRenderState>(device, UINT(kRsZWriteEnable), DWORD(TRUE));
         VCall<dev::SetRenderState>(device, UINT(kRsAlphaBlendEnable), DWORD(FALSE));
-        VCall<dev::SetRenderState>(device, UINT(kRsAlphaTestEnable), DWORD(TRUE));
+        VCall<dev::SetRenderState>(device, UINT(kRsAlphaTestEnable), untextured ? DWORD(FALSE) : DWORD(TRUE));
         VCall<dev::SetRenderState>(device, UINT(kRsAlphaRef), DWORD(0x80));
         VCall<dev::SetRenderState>(device, UINT(kRsAlphaFunc), DWORD(kCmpGreaterEqual));
         drawPass(false);
@@ -429,6 +521,43 @@ namespace
         }
     }
 
+    // Called inside MP2's own scene (our EndScene hook): its depth buffer still belongs to the 3D
+    // scene it just drew, so blocks keep their occlusion.
+    void DrawWorldAtEndScene(void* device)
+    {
+        const Runtime& st = State();
+        if (!g_stateBlock)
+            VCall<dev::CreateStateBlock>(device, UINT(kStateBlockAll), &g_stateBlock);
+        if (g_stateBlock)
+            VCall<dev::CaptureStateBlock>(device, g_stateBlock);
+        Viewport saved{};
+        VCall<dev::GetViewport>(device, &saved);
+        const Viewport full{ 0, 0, saved.Width ? saved.Width : 1280u, saved.Height ? saved.Height : 720u, 0.0f, 1.0f };
+        VCall<dev::SetViewport>(device, &full);
+        g_ownDraw = true;
+        Guarded([&] {
+            if (st.cameraValid)
+                DrawWorld(device, st, full.Width, full.Height);
+        });
+        g_ownDraw = false;
+        VCall<dev::SetViewport>(device, &saved);
+        if (g_stateBlock)
+            VCall<dev::ApplyStateBlock>(device, g_stateBlock);
+    }
+
+    HRESULT __stdcall BeginSceneHook(void* device)
+    {
+        g_sceneHadPerspective = false;
+        return g_origBeginScene(device);
+    }
+
+    HRESULT __stdcall EndSceneHook(void* device)
+    {
+        if (Config::Get().drawAtEndScene && g_sceneHadPerspective && State().mcInWorld)
+            DrawWorldAtEndScene(device);
+        return g_origEndScene(device);
+    }
+
     HRESULT __stdcall Present(void* device, const RECT* src, const RECT* dst, HWND window, const void* dirty)
     {
         if (device != g_device) {
@@ -467,6 +596,21 @@ namespace
             Link::Get().DrainRender([&](std::uint32_t type, const std::uint8_t* data, std::uint32_t bytes) { OnRenderMessage(device, type, data, bytes); },
                                     8ull << 20);
 
+            // Once per device: does one exist, and what is it?
+            static void* depthLoggedFor = nullptr;
+            if (device != depthLoggedFor) {
+                depthLoggedFor = device;
+                void* depth = nullptr;
+                if (SUCCEEDED(VCall<dev::GetDepthStencilSurface>(device, &depth))) {
+                    SurfaceDesc desc{};
+                    if (SUCCEEDED(VCall<surf::GetDesc>(depth, &desc)))
+                        mclog::Info("render: depth stencil {}x{} format {} multisample {}", desc.Width, desc.Height, desc.Format, desc.MultiSampleType);
+                    Release(depth);
+                } else {
+                    mclog::Info("render: no depth stencil attached");
+                }
+            }
+
             const Runtime& st = State();
             if (st.mcInWorld) {
                 if (!g_stateBlock)
@@ -480,7 +624,7 @@ namespace
                 if (SUCCEEDED((VCall<dev::BeginScene>(device)))) {
                     g_ownDraw = true;
                     Guarded([&] {
-                        if (st.cameraValid)
+                        if (st.cameraValid && !Config::Get().drawAtEndScene)
                             DrawWorld(device, st, w, h);
                         DrawOverlay(device, st, w, h);
                     });
@@ -496,10 +640,10 @@ namespace
         if (GetTickCount() - lastLog > 5000) {
             lastLog = GetTickCount();
             mclog::Info("render: view set {} times, replaced {}, world matrices moved {}; scene projection {}; {} block sections, {} block "
-                        "triangles drawn, atlas {}, scene z mode {}, shader constants moved {}",
+                        "triangles drawn, atlas {}, scene z mode {}, shader constants moved {}, our draw failures {}",
                         g_viewSets, g_viewReplaced, g_worldCorrected, g_haveProj ? "seen" : "not seen", g_sections.size(), g_trianglesDrawn,
-                        g_atlas ? "yes" : "no", g_sceneZEnable, g_constantsMoved);
-            g_viewSets = g_viewReplaced = g_worldCorrected = g_trianglesDrawn = g_constantsMoved = 0;
+                        g_atlas ? "yes" : "no", g_sceneZEnable, g_constantsMoved, g_drawFailures);
+            g_viewSets = g_viewReplaced = g_worldCorrected = g_trianglesDrawn = g_constantsMoved = g_drawFailures = 0;
         }
         g_haveView = g_haveProj = false;  // MP2 sets them again each frame
         return g_origPresent(device, src, dst, window, dirty);
@@ -688,6 +832,8 @@ namespace
         } else if (state == kTsProjection) {
             perspective = matrix->m[2][3] != 0.0f && matrix->m[3][3] == 0.0f;
             g_perspectiveActive = perspective;
+            if (perspective)
+                g_sceneHadPerspective = true;
             if (perspective && std::memcmp(&g_mp2Proj, matrix, sizeof(Matrix)) != 0) {
                 g_mp2Proj = *matrix;
                 g_haveProjInverse = Inverse4(g_mp2Proj, g_mp2ProjInverse);
@@ -721,6 +867,8 @@ namespace
             void* device = *out;
             InstallHook(VSlot(device, dev::Present), reinterpret_cast<void*>(&Present), g_origPresent, "IDirect3DDevice8::Present");
             InstallHook(VSlot(device, dev::Reset), reinterpret_cast<void*>(&Reset), g_origReset, "IDirect3DDevice8::Reset");
+            InstallHook(VSlot(device, dev::BeginScene), reinterpret_cast<void*>(&BeginSceneHook), g_origBeginScene, "IDirect3DDevice8::BeginScene");
+            InstallHook(VSlot(device, dev::EndScene), reinterpret_cast<void*>(&EndSceneHook), g_origEndScene, "IDirect3DDevice8::EndScene");
             InstallHook(VSlot(device, dev::SetTransform), reinterpret_cast<void*>(&SetTransform), g_origSetTransform, "IDirect3DDevice8::SetTransform");
             InstallHook(VSlot(device, dev::SetRenderState), reinterpret_cast<void*>(&SetRenderState), g_origSetRenderState, "IDirect3DDevice8::SetRenderState");
             InstallHook(VSlot(device, dev::SetVertexShaderConstant), reinterpret_cast<void*>(&SetVertexShaderConstant), g_origSetVsConstant,

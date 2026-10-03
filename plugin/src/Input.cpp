@@ -128,7 +128,7 @@ namespace
     {
         if (State().mcScreenOpen)
             return false;
-        return dik == kDikEscape || dik == kDikF9;
+        return dik == kDikEscape || dik == kDikF9 || dik == static_cast<std::uint32_t>(Config::Get().useKey);
     }
 
     void HandleKey(std::uint32_t dik, bool down)
@@ -145,7 +145,13 @@ namespace
         const auto& cfg = Config::Get();
         if (!st.mcScreenOpen) {
             if (GameKeeps(dik) || dik == static_cast<std::uint32_t>(cfg.quickSaveKey) || dik == static_cast<std::uint32_t>(cfg.bulletTimeKey))
-                return;  // MP2's (injected below)
+                return;  // MP2's (injected below or passed straight through)
+            if (dik == static_cast<std::uint32_t>(cfg.inventoryKey)) {
+                // Minecraft's inventory, on a key of its own: E itself stays MP2's action key.
+                if (const auto sdl = kDikToSdl[0x12])
+                    link.PushInput(proto::kInKey, sdl, down ? 1 : 0);
+                return;
+            }
             if (dik == kDikO) {
                 if (down) {
                     input::ReleaseAll();
@@ -380,11 +386,17 @@ namespace
 namespace
 {
     // Virtual-key versions of the keys MP2 keeps.
+    UINT UseKeyVk()
+    {
+        static const UINT vk = MapVirtualKeyW(static_cast<UINT>(Config::Get().useKey) & 0xFF, MAPVK_VSC_TO_VK);
+        return vk;
+    }
+
     bool GameKeepsVk(UINT vk)
     {
         if (State().mcScreenOpen)
             return false;
-        return vk == VK_ESCAPE || vk == VK_F9;
+        return vk == VK_ESCAPE || vk == VK_F9 || vk == UseKeyVk();
     }
 
     UINT QuickSaveVk()

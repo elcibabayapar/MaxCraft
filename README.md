@@ -44,12 +44,14 @@ SkyCraft'ı Skyrim için zaten kurduysanız iki mod aynı Minecraft kurulumunu v
 | Tuş | İşlev |
 |---|---|
 | Esc | MP2 menüsü (açık bir Minecraft ekranını da kapatır) |
+| E | MP2 eylem tuşu: kapılar, düğmeler (MP2'nin kendi tuşu) |
+| I | Minecraft envanteri |
 | B (basılı) | MP2 bullet-time |
 | F6 | MP2 hızlı kayıt (F5 Minecraft'ın kamera tuşu olduğu için) |
 | F9 | MP2 hızlı yükleme |
 | O | Minecraft duraklatma ve ayarlar menüsü |
 
-Diğer bütün tuşlar Minecraft'ındır: E envanter, F5 kamera, T sohbet, / komutlar, Shift eğilme vb. Tuşlar `MaxCraft.ini` içinde değiştirilebilir.
+Diğer bütün tuşlar Minecraft'ındır: F5 kamera, T sohbet, / komutlar, Shift eğilme vb. E ve I tuşları `MaxCraft.ini` içindeki `iUseKey` ve `iInventoryKey` ile, diğer tuşlar Minecraft'ın kendi ayarlarından değiştirilebilir.
 
 ## Ayarlar
 

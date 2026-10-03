@@ -26,10 +26,14 @@ struct Config
     // [Controls]
     int bulletTimeKey = 0x30;  // DIK_B: held -> MP2's bullet time (right mouse button)
     int quickSaveKey = 0x40;   // DIK_F6: -> MP2's quicksave (F5, which is Minecraft's camera key)
+    int useKey = 0x12;         // DIK_E: stays MP2's (its action key: doors, switches)
+    int inventoryKey = 0x17;   // DIK_I: Minecraft receives it as E (its inventory key)
 
     // [Debug]
     bool diagnostics = false;
-    bool blocksNoDepth = false;  // [Debug] bBlocksNoDepth: draw Minecraft's blocks over everything
+    bool blocksNoDepth = false;    // draw Minecraft's blocks over everything
+    bool blocksNoTexture = false;  // draw them untextured (vertex colour only): texture or transform?
+    bool drawAtEndScene = false;   // draw blocks at MP2's EndScene, while its depth buffer is the scene's
 
     static const Config& Get();
     static std::wstring GameDir();

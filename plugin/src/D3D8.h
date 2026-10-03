@@ -109,6 +109,7 @@ namespace d3d8
         constexpr int CreateVertexBuffer = 23;
         constexpr int GetCreationParameters = 9;
         constexpr int GetRenderTarget = 32;
+        constexpr int GetDepthStencilSurface = 33;
         constexpr int BeginScene = 34;
         constexpr int EndScene = 35;
         constexpr int SetTransform = 37;

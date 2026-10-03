@@ -1,6 +1,7 @@
 #include "Camera.h"
 #include "Characters.h"
 #include "Collision.h"
+#include "CrashLog.h"
 #include "Config.h"
 #include "Engine.h"
 #include "Input.h"
@@ -17,6 +18,7 @@ namespace
     DWORD WINAPI Startup(LPVOID)
     {
         mclog::Init();
+        crashlog::Install();
         mclog::Info("MaxCraft 0.1.0 loaded (protocol v{})", proto::kVersion);
 
         // Minecraft takes about as long to start as MP2 does to reach its menu: start it first.

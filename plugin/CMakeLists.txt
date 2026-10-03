@@ -34,6 +34,7 @@ add_library(MaxCraft SHARED
     src/Characters.cpp
     src/Collision.cpp
     src/Config.cpp
+    src/CrashLog.cpp
     src/Engine.cpp
     src/Input.cpp
     src/Launcher.cpp

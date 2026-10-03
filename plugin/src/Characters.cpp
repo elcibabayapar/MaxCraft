@@ -466,8 +466,9 @@ namespace
 
     void __fastcall UpdateCharacterPhysics(X_Character* self, void*, float dt, P_Camera* camera)
     {
-        if (self == State().player && State().minecraftOwnsPlayer)
-            return;  // Minecraft moves Max: MP2's controller would fight it
+        // MP2's physics still runs for Max: it is where MP2 tracks which room he is in, and MP2
+        // only draws the rooms visible from there (skipping it left new rooms black). It gets
+        // no input while Minecraft has him, and updatePostPhysics puts him where Minecraft says.
         g_origPhysics(self, dt, camera);
     }
 

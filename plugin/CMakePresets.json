@@ -1,0 +1,18 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "x86-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    { "name": "x86-release", "inherits": "x86-base" },
+    { "name": "x86-debug", "inherits": "x86-base" }
+  ],
+  "buildPresets": [
+    { "name": "x86-release", "configurePreset": "x86-release", "configuration": "RelWithDebInfo" },
+    { "name": "x86-debug", "configurePreset": "x86-debug", "configuration": "Debug" }
+  ]
+}

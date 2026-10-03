@@ -1,0 +1,25 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true  # extern/SkyCraft only; its own submodules aren't needed
+
+      - name: Build and package
+        shell: pwsh
+        run: ./tools/package.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MaxCraft
+          path: |
+            dist/MaxCraft-*.zip
+            plugin/build/x86-release/RelWithDebInfo/MaxCraft.pdb

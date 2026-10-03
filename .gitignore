@@ -1,0 +1,28 @@
+# Build output
+build/
+out/
+dist/
+*.asi
+*.pdb
+*.ilk
+*.obj
+
+# IDE
+.vs/
+.vscode/
+.idea/
+CMakeUserPresets.json
+
+# Gradle / Java (fabric)
+fabric/.gradle/
+fabric/build/
+fabric/run/
+
+# Generated reverse-engineering dumps of game binaries (regenerate with tools/dump_exports.py)
+re/
+
+# Never commit game files
+*.ras
+*.exe
+*.dll
+*.log

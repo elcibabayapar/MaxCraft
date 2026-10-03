@@ -1,0 +1,3 @@
+[submodule "extern/SkyCraft"]
+	path = extern/SkyCraft
+	url = https://github.com/chasmlol/SkyCraft.git

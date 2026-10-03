@@ -566,12 +566,21 @@ namespace
             g_stateBlock = 0;
             g_device = device;
         }
-        // Minecraft starts once MP2's window is up and drawing: its launcher popping up while MP2
-        // is still starting steals focus, and MP2 crashes in its own window code (maxpayne2.exe+0x1b80).
-        static bool minecraftStarted = false;
+        // Minecraft starts once a level is actually running (the player updating), not during MP2's
+        // loading: its boot storm (JVM, disk, the launcher's window) while a level loads crashed MP2
+        // inside its own loader twice now. A 60 s fallback keeps it starting even if the player is
+        // never detected (or the user sits at the menu, which is a safe time too).
+        static bool  minecraftStarted = false;
+        static DWORD firstPresent = 0;
         if (!minecraftStarted) {
-            minecraftStarted = true;
-            launcher::StartMinecraft();
+            if (!firstPresent)
+                firstPresent = GetTickCount();
+            const Runtime& rst = State();
+            const bool     playing = rst.player && GetTickCount64() - rst.lastPlayerFrameMs < 500;
+            if (playing || GetTickCount() - firstPresent > 60000) {
+                minecraftStarted = true;
+                launcher::StartMinecraft();
+            }
         }
         if (!g_windowAttached) {
             DeviceCreationParameters params{};

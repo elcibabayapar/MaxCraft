@@ -65,6 +65,31 @@ namespace
             }
         }
         mclog::Info("  stack:{}", trail);
+
+        // Raw bytes for offline disassembly: the code around the fault, and the top of the stack
+        // (a window procedure's hwnd / message / wParam / lParam sit just above its return address).
+        auto hex = [](DWORD from, int count) {
+            std::string out;
+            for (int i = 0; i < count; ++i) {
+                BYTE b = 0;
+                if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(from + i), &b, 1, nullptr))
+                    return out + " ??";
+                out += std::format("{:02x}", b);
+            }
+            return out;
+        };
+        mclog::Info("  code {} @{:#010x}: {}", Describe(c->Eip - 0x40), c->Eip - 0x40, hex(c->Eip - 0x40, 0x80));
+        std::string words;
+        for (int i = 0; i < 32; ++i) {
+            DWORD value = 0;
+            if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(c->Esp + i * 4), &value, 4, nullptr))
+                break;
+            words += std::format(" {:08x}", value);
+        }
+        mclog::Info("  esp words:{}", words);
+        DWORD frame[4]{};
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(c->Ebp), frame, sizeof(frame), nullptr);
+        mclog::Info("  [ebp] {:08x} ret {} args {:08x} {:08x}", frame[0], Describe(frame[1]), frame[2], frame[3]);
         return EXCEPTION_CONTINUE_SEARCH;  // only record; MP2 and our own guards still handle it
     }
 }

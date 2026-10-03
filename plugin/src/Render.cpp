@@ -52,6 +52,36 @@ namespace
     // For vertex-shader draws (skinned characters): MP2's projection, its inverse, and the camera
     // correction inverse(mp2View) * ourView of this frame.
     Matrix g_mp2Proj{}, g_mp2ProjInverse{}, g_correction{};
+    // The projections MP2's world was drawn with this frame, and how many world draws used each:
+    // blocks use the busiest one (the last projection set can be the weapon's or an effect's, which
+    // drew the blocks skewed against the world).
+    struct ProjUse
+    {
+        Matrix m;
+        UINT   uses;
+    };
+    ProjUse g_frameProj[4]{};
+    UINT    g_frameProjCount = 0;
+
+    void NoteSceneProjection()
+    {
+        for (UINT i = 0; i < g_frameProjCount; ++i)
+            if (std::memcmp(&g_frameProj[i].m, &g_mp2Proj, sizeof(Matrix)) == 0) {
+                ++g_frameProj[i].uses;
+                return;
+            }
+        if (g_frameProjCount < 4)
+            g_frameProj[g_frameProjCount++] = { g_mp2Proj, 1 };
+    }
+
+    const Matrix* SceneProjection()
+    {
+        const ProjUse* best = nullptr;
+        for (UINT i = 0; i < g_frameProjCount; ++i)
+            if (!best || g_frameProj[i].uses > best->uses)
+                best = &g_frameProj[i];
+        return best ? &best->m : nullptr;
+    }
     bool   g_haveProjInverse = false, g_haveCorrection = false;
     UINT   g_constantsMoved = 0;
     // Whether this scene (BeginScene..EndScene) saw a perspective projection: MP2's 3D world does,
@@ -360,8 +390,19 @@ namespace
         // carry no eye translation and would displace every block off screen.
         Matrix view{}, proj{};
         ComputeCamera(st, view, proj, w, h);
-        if (g_haveProj)
-            proj = g_proj;  // the projection the picture really uses
+        if (const Matrix* scene = SceneProjection())
+            proj = *scene;  // the projection MP2's world was drawn with this frame
+        else if (g_haveProj)
+            proj = g_proj;
+        static DWORD lastProjLog = 0;
+        if (g_frameProjCount > 1 && GetTickCount() - lastProjLog > 5000) {
+            lastProjLog = GetTickCount();
+            std::string all;
+            for (UINT i = 0; i < g_frameProjCount; ++i)
+                all += std::format(" [{:.3f}/{:.3f} near-ish {:.3f}: {} draws]", g_frameProj[i].m.m[0][0], g_frameProj[i].m.m[1][1],
+                                   g_frameProj[i].m.m[3][2], g_frameProj[i].uses);
+            mclog::Info("blocks: {} projections this frame, using the busiest:{}", g_frameProjCount, all);
+        }
 
         // Where does the first block vertex actually land on the screen? Decides between "wrong
         // matrices" (off screen) and "pixels discarded" (on screen but invisible).
@@ -702,6 +743,7 @@ namespace
         }
         g_haveView = g_haveProj = false;  // MP2 sets them again each frame
         g_frameSceneDraws = 0;
+        g_frameProjCount = 0;
         g_blocksDrawnThisFrame = false;
         return g_origPresent(device, src, dst, window, dirty);
     }
@@ -872,12 +914,15 @@ namespace
                 matrix = &ours;
                 ++g_viewReplaced;
                 ++g_frameSceneDraws;
+                if (perspective)
+                    NoteSceneProjection();
             }
         } else if (state == kTsWorld && viewIsIdentity && perspective && st.cameraValid && haveCorrection) {
             corrected = Multiply(*matrix, correction);
             matrix = &corrected;
             ++g_worldCorrected;
             ++g_frameSceneDraws;
+            NoteSceneProjection();
         }
         if (!st.cameraValid)
             haveCorrection = g_haveCorrection = false;

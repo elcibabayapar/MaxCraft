@@ -369,7 +369,7 @@ namespace
                 }
             }
         }
-        if (!g_overlay || !g_haveOverlay || !st.mcInWorld)
+        if (!g_overlay || !g_haveOverlay || !st.mcInWorld || !st.minecraftOwnsPlayer || st.gameOwnsInput)
             return;
 
         SetCommonStates(device);

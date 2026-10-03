@@ -62,6 +62,8 @@ namespace
     bool          g_takeover = false;
     DWORD         g_lastFrameTick = 0;
     McPoint       g_playerMc{};  // where MP2 has Max right now (Minecraft coords)
+    bool          g_playerMcValid = false;
+    DWORD         g_lastStatusLog = 0;
 
     Tracked& Track(X_Character* c)
     {
@@ -350,6 +352,7 @@ namespace
         // MP2 moved Max itself (level start, script, loaded save): resync Minecraft.
         float maxYaw = 0.0f;
         const bool haveFeet = FeetOf(player, g_playerMc, &maxYaw);
+        g_playerMcValid = haveFeet && map.Calibrated();
         if (haveFeet && g_haveLastSet && st.puppeting) {
             const double dx = g_playerMc.x - g_lastSet.x, dy = g_playerMc.y - g_lastSet.y, dz = g_playerMc.z - g_lastSet.z;
             if (dx * dx + dy * dy + dz * dz > 4.0) {
@@ -396,6 +399,15 @@ namespace
             BuildCamera(st);
         }
         st.cameraValid = puppet;
+
+        // Every few seconds: where both games think Max is (to check the mapping in the field).
+        if (nowTick - g_lastStatusLog > 5000) {
+            g_lastStatusLog = nowTick;
+            const Matrix4x3* m = TransformOf(player);
+            mclog::Info("status: puppet {} | MP2 origin ({:.2f}, {:.2f}, {:.2f}) -> MC ({:.2f}, {:.2f}, {:.2f}) yaw {:.0f} | MC feet ({:.2f}, {:.2f}, {:.2f}) ack {}/{} | look {:.0f}/{:.0f}",
+                        puppet, m ? m->row[3].x : 0.0f, m ? m->row[3].y : 0.0f, m ? m->row[3].z : 0.0f, g_playerMc.x, g_playerMc.y, g_playerMc.z, maxYaw,
+                        st.mc.x, st.mc.y, st.mc.z, st.mc.teleportAck, g_teleportSeq, st.yaw, st.pitch);
+        }
 
         HandleEvents();
         WriteActors();
@@ -515,7 +527,8 @@ void characters::OnPresent(std::uint32_t width, std::uint32_t height)
         st.cameraValid = false;
 
     proto::SkyState sky{};
-    sky.flags = (st.player ? proto::kSkyInGame : 0u) | (paused ? proto::kSkyMenuOpen : 0u) | (!st.player ? proto::kSkyLoading : 0u);
+    const bool inGame = st.player && g_playerMcValid;
+    sky.flags = (inGame ? proto::kSkyInGame : 0u) | (paused ? proto::kSkyMenuOpen : 0u) | (!inGame ? proto::kSkyLoading : 0u);
     sky.worldId = st.levelId;
     sky.collisionEpoch = st.epoch;
     sky.posX = g_playerMc.x;

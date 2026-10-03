@@ -3,6 +3,7 @@
 #include <Windows.h>
 
 #include <cstdio>
+#include <share.h>
 #include <mutex>
 
 namespace
@@ -17,7 +18,7 @@ void mclog::Init()
     GetModuleFileNameW(nullptr, path, MAX_PATH);
     if (wchar_t* slash = wcsrchr(path, L'\\'))
         wcscpy_s(slash + 1, MAX_PATH - (slash + 1 - path), L"MaxCraft.log");
-    _wfopen_s(&g_file, path, L"w");
+    g_file = _wfsopen(path, L"w", _SH_DENYNO);  // readable while the game runs
 }
 
 void mclog::Write(const std::string& line)

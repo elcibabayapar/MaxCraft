@@ -17,6 +17,7 @@ struct Config
     float feetOffset = 0.0f;     // MP2 units from the character origin down to the feet
     int   forwardRow = 2;        // which row of an MP2 transform is "forward"
     float gameHour = 12.0f;      // Minecraft's time of day (MP2 has no clock)
+    float bodyBehind = 0.7f;     // first person: Max's body this many blocks behind the eye (out of view)
 
     // [Combat]
     float enemyDamageScale = 1.5f;   // Minecraft damage / 20 of an enemy's full health, times this

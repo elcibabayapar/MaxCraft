@@ -56,6 +56,7 @@ const Config& Config::Get()
         c.feetOffset = ReadFloat(ini, L"World", L"fFeetOffset", c.feetOffset);
         c.forwardRow = ReadInt(ini, L"World", L"iForwardRow", c.forwardRow);
         c.gameHour = ReadFloat(ini, L"World", L"fGameHour", c.gameHour);
+        c.bodyBehind = ReadFloat(ini, L"World", L"fBodyBehind", c.bodyBehind);
 
         c.enemyDamageScale = ReadFloat(ini, L"Combat", L"fEnemyDamageScale", c.enemyDamageScale);
         c.playerDamageScale = ReadFloat(ini, L"Combat", L"fPlayerDamageScale", c.playerDamageScale);

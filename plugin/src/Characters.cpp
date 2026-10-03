@@ -428,11 +428,19 @@ namespace
         Matrix4x3        m{};
         map.FacingYaw(st.yaw, cfg.forwardRow, m);
         const mp2::Vec3 up = map.DirToMp2(0, 1, 0);
-        const mp2::Vec3 feet = map.ToMp2(st.feetX, st.feetY, st.feetZ);
+        // First person: the camera sits inside Max's head, so his body steps back out of view.
+        // MP2 still has him right next to the player (enemies see and shoot him there).
+        double fx = st.feetX, fz = st.feetZ;
+        if (st.mc.cameraMode == 0) {
+            const double yaw = st.yaw * 0.017453292519943295;
+            fx += std::sin(yaw) * cfg.bodyBehind;
+            fz -= std::cos(yaw) * cfg.bodyBehind;
+        }
+        const mp2::Vec3 feet = map.ToMp2(fx, st.feetY, fz);
         m.row[3] = { feet.x + up.x * cfg.feetOffset, feet.y + up.y * cfg.feetOffset, feet.z + up.z * cfg.feetOffset };
         Guarded([&] { api.setTransform(api.accessCharacterProperties(player), m); });
         MovePhantom(RigidBodyOf(player), m);
-        g_lastSet = { st.feetX, st.feetY, st.feetZ };
+        g_lastSet = { fx, st.feetY, fz };
         g_haveLastSet = true;
     }
 

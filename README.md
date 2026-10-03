@@ -44,9 +44,9 @@ SkyCraft'ı Skyrim için zaten kurduysanız iki mod aynı Minecraft kurulumunu v
 | Tuş | İşlev |
 |---|---|
 | Esc | MP2 menüsü (açık bir Minecraft ekranını da kapatır) |
-| E | MP2 eylem tuşu: kapılar, düğmeler (MP2'nin kendi tuşu) |
-| I | Minecraft envanteri |
-| B (basılı) | MP2 bullet-time |
+| G | MP2 eylem tuşu: kapılar, düğmeler (MP2'nin kendi tuşu) |
+| E | Minecraft envanteri |
+| V | MP2 Özellikleri |
 | F6 | MP2 hızlı kayıt (F5 Minecraft'ın kamera tuşu olduğu için) |
 | F9 | MP2 hızlı yükleme |
 | O | Minecraft duraklatma ve ayarlar menüsü |

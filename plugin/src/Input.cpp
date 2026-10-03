@@ -301,6 +301,9 @@ namespace
         return hr;
     }
 
+    bool GameKeepsVk(UINT vk);
+    UINT QuickSaveVk();
+
     LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
         if (message == WM_CHAR && Routed() && State().mcScreenOpen) {
@@ -316,6 +319,13 @@ namespace
             if (code >= 32 && code != 127)
                 Link::Get().PushInput(proto::kInText, 0, static_cast<std::int32_t>(code));
             return 0;
+        }
+        if ((message == WM_KEYDOWN || message == WM_KEYUP || message == WM_SYSKEYDOWN || message == WM_SYSKEYUP) && Routed()) {
+            const UINT vk = static_cast<UINT>(wParam);
+            if (vk == QuickSaveVk() && !State().mcScreenOpen)
+                return CallWindowProcW(g_origWndProc, window, message, VK_F5, lParam);
+            if (!GameKeepsVk(vk))
+                return 0;
         }
         if (message == WM_KILLFOCUS)
             input::ReleaseAll();
@@ -367,8 +377,129 @@ namespace
     }
 }
 
+namespace
+{
+    // Virtual-key versions of the keys MP2 keeps.
+    bool GameKeepsVk(UINT vk)
+    {
+        if (State().mcScreenOpen)
+            return false;
+        return vk == VK_ESCAPE || vk == VK_F9;
+    }
+
+    UINT QuickSaveVk()
+    {
+        static const UINT vk = MapVirtualKeyW(static_cast<UINT>(Config::Get().quickSaveKey) & 0xFF, MAPVK_VSC_TO_VK);
+        return vk;
+    }
+
+    using GetAsyncKeyStateFn = SHORT(WINAPI*)(int);
+    using GetKeyStateFn = SHORT(WINAPI*)(int);
+    using GetKeyboardStateFn = BOOL(WINAPI*)(PBYTE);
+    using SetWindowsHookExAFn = HHOOK(WINAPI*)(int, HOOKPROC, HINSTANCE, DWORD);
+    using TranslateAcceleratorAFn = int(WINAPI*)(HWND, HACCEL, LPMSG);
+    GetAsyncKeyStateFn      g_origGetAsyncKeyState = nullptr;
+    GetKeyStateFn           g_origGetKeyState = nullptr;
+    GetKeyboardStateFn      g_origGetKeyboardState = nullptr;
+    SetWindowsHookExAFn     g_origSetWindowsHookExA = nullptr;
+    TranslateAcceleratorAFn g_origTranslateAcceleratorA = nullptr;
+    HOOKPROC                g_gameKeyboardHook = nullptr;
+
+    bool QuickSaveHeld()
+    {
+        const UINT vk = QuickSaveVk();
+        return vk && (g_origGetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
+    }
+
+    // What MP2 may see of key `vk` while Minecraft has the keyboard.
+    bool Hidden(int vk)
+    {
+        return Routed() && !GameKeepsVk(static_cast<UINT>(vk) & 0xFF);
+    }
+
+    SHORT WINAPI GetAsyncKeyStateHook(int vk)
+    {
+        if (Hidden(vk))
+            return (vk == VK_F5 && !State().mcScreenOpen && QuickSaveHeld()) ? SHORT(0x8000) : SHORT(0);
+        return g_origGetAsyncKeyState(vk);
+    }
+
+    SHORT WINAPI GetKeyStateHook(int vk)
+    {
+        if (Hidden(vk))
+            return (vk == VK_F5 && !State().mcScreenOpen && QuickSaveHeld()) ? SHORT(0xFF80) : SHORT(0);
+        return g_origGetKeyState(vk);
+    }
+
+    BOOL WINAPI GetKeyboardStateHook(PBYTE keys)
+    {
+        const BOOL ok = g_origGetKeyboardState(keys);
+        if (ok && keys && Routed()) {
+            for (int vk = 0; vk < 256; ++vk)
+                if (!GameKeepsVk(static_cast<UINT>(vk)))
+                    keys[vk] = 0;
+            if (!State().mcScreenOpen && QuickSaveHeld())
+                keys[VK_F5] = 0x80;
+        }
+        return ok;
+    }
+
+    // MP2's WH_KEYBOARD hook: while Minecraft has the keyboard it only hears the keys MP2 keeps
+    // (and our quicksave key, as F5).
+    LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wParam, LPARAM lParam)
+    {
+        if (code >= 0 && Routed() && g_gameKeyboardHook) {
+            const UINT vk = static_cast<UINT>(wParam);
+            if (vk == QuickSaveVk() && !State().mcScreenOpen)
+                return g_gameKeyboardHook(code, VK_F5, lParam);
+            if (!GameKeepsVk(vk))
+                return CallNextHookEx(nullptr, code, wParam, lParam);
+        }
+        return g_gameKeyboardHook ? g_gameKeyboardHook(code, wParam, lParam) : CallNextHookEx(nullptr, code, wParam, lParam);
+    }
+
+    HHOOK WINAPI SetWindowsHookExAHook(int id, HOOKPROC proc, HINSTANCE module, DWORD thread)
+    {
+        mclog::Info("input: MP2 installs a Windows hook (type {})", id);
+        if ((id == WH_KEYBOARD || id == WH_KEYBOARD_LL) && proc && !g_gameKeyboardHook) {
+            g_gameKeyboardHook = proc;
+            return g_origSetWindowsHookExA(id, KeyboardHookProc, module, thread);
+        }
+        return g_origSetWindowsHookExA(id, proc, module, thread);
+    }
+
+    // Keyboard shortcuts (quicksave and friends): only for the keys MP2 keeps.
+    int WINAPI TranslateAcceleratorAHook(HWND window, HACCEL table, LPMSG message)
+    {
+        if (message && Routed() &&
+            (message->message == WM_KEYDOWN || message->message == WM_KEYUP || message->message == WM_SYSKEYDOWN || message->message == WM_SYSKEYUP)) {
+            const UINT vk = static_cast<UINT>(message->wParam);
+            if (vk == QuickSaveVk() && !State().mcScreenOpen) {
+                MSG copy = *message;
+                copy.wParam = VK_F5;
+                return g_origTranslateAcceleratorA(window, table, &copy);
+            }
+            if (!GameKeepsVk(vk))
+                return 0;
+        }
+        return g_origTranslateAcceleratorA(window, table, message);
+    }
+
+    void HookWindowsKeyboard()
+    {
+        HMODULE user32 = GetModuleHandleW(L"user32.dll");
+        auto    at = [&](const char* name) { return reinterpret_cast<void*>(GetProcAddress(user32, name)); };
+        InstallHook(at("GetAsyncKeyState"), reinterpret_cast<void*>(&GetAsyncKeyStateHook), g_origGetAsyncKeyState, "GetAsyncKeyState");
+        InstallHook(at("GetKeyState"), reinterpret_cast<void*>(&GetKeyStateHook), g_origGetKeyState, "GetKeyState");
+        InstallHook(at("GetKeyboardState"), reinterpret_cast<void*>(&GetKeyboardStateHook), g_origGetKeyboardState, "GetKeyboardState");
+        InstallHook(at("SetWindowsHookExA"), reinterpret_cast<void*>(&SetWindowsHookExAHook), g_origSetWindowsHookExA, "SetWindowsHookExA");
+        InstallHook(at("TranslateAcceleratorA"), reinterpret_cast<void*>(&TranslateAcceleratorAHook), g_origTranslateAcceleratorA, "TranslateAcceleratorA");
+    }
+}
+
 bool input::Install()
 {
+    HookWindowsKeyboard();
     HMODULE dinput = LoadLibraryW(L"dinput.dll");
     void*   create = dinput ? reinterpret_cast<void*>(GetProcAddress(dinput, "DirectInputCreateA")) : nullptr;
     if (!create) {

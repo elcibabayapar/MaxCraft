@@ -30,7 +30,11 @@ namespace
     // line up with its picture and depth buffer.
     Matrix g_view{}, g_proj{};
     bool   g_haveView = false, g_haveProj = false;
-    UINT   g_viewSets = 0, g_viewReplaced = 0;  // per 5 s, for the log
+    UINT   g_viewSets = 0, g_viewReplaced = 0, g_worldCorrected = 0;  // per 5 s, for the log
+    DWORD  g_sceneZEnable = 1;  // D3DRS_ZENABLE as MP2's 3D scene set it (1 z-buffer, 2 w-buffer)
+    UINT   g_trianglesDrawn = 0;
+    bool   g_ownDraw = false;  // our own SetTransform / SetRenderState calls pass straight through
+    bool   g_perspectiveActive = false;
 
     struct Vertex
     {
@@ -145,7 +149,7 @@ namespace
         static constexpr float kShade[7] = { 1.0f, 0.5f, 1.0f, 0.8f, 0.8f, 0.6f, 0.6f };  // none, down, up, N, S, W, E
         const float k = bright * kShade[std::clamp<std::uint32_t>((flags >> 4) & 7, 0, 6)];
         auto        channel = [&](int shift) { return static_cast<DWORD>(std::clamp(((rgba >> shift) & 0xFF) * k, 0.0f, 255.0f)); };
-        return ((rgba >> 24) << 24) | (channel(0) << 16) | (channel(8) << 8) | channel(16);
+        return 0xFF000000u | (channel(0) << 16) | (channel(8) << 8) | channel(16);
     }
 
     void OnRenderMessage(void* device, std::uint32_t type, const std::uint8_t* data, std::uint32_t bytes)
@@ -291,7 +295,7 @@ namespace
         VCall<dev::SetTransform>(device, UINT(kTsProjection), static_cast<const Matrix*>(&proj));
         SetCommonStates(device);
         VCall<dev::SetTexture>(device, 0u, g_atlas);
-        VCall<dev::SetRenderState>(device, UINT(kRsZEnable), DWORD(TRUE));
+        VCall<dev::SetRenderState>(device, UINT(kRsZEnable), g_sceneZEnable ? g_sceneZEnable : DWORD(TRUE));
         VCall<dev::SetRenderState>(device, UINT(kRsZFunc), DWORD(kCmpLessEqual));
 
         auto&  map = Mapping::Get();
@@ -306,6 +310,7 @@ namespace
                 VCall<dev::SetTransform>(device, UINT(kTsWorld), static_cast<const Matrix*>(&world));
                 VCall<dev::SetStreamSource>(device, 0u, vb, UINT(sizeof(Vertex)));
                 VCall<dev::DrawPrimitive>(device, UINT(kPtTriangleList), 0u, count / 3);
+                g_trianglesDrawn += count / 3;
             }
         };
 
@@ -453,11 +458,13 @@ namespace
                 const Viewport full{ 0, 0, w, h, 0.0f, 1.0f };
                 VCall<dev::SetViewport>(device, &full);
                 if (SUCCEEDED((VCall<dev::BeginScene>(device)))) {
+                    g_ownDraw = true;
                     Guarded([&] {
                         if (st.cameraValid)
                             DrawWorld(device, st, w, h);
                         DrawOverlay(device, st, w, h);
                     });
+                    g_ownDraw = false;
                     VCall<dev::EndScene>(device);
                 }
                 VCall<dev::SetViewport>(device, &saved);
@@ -468,9 +475,11 @@ namespace
         static DWORD lastLog = 0;
         if (GetTickCount() - lastLog > 5000) {
             lastLog = GetTickCount();
-            mclog::Info("render: view set {} times, replaced {}; scene projection {}; {} block sections", g_viewSets, g_viewReplaced,
-                        g_haveProj ? "seen" : "not seen", g_sections.size());
-            g_viewSets = g_viewReplaced = 0;
+            mclog::Info("render: view set {} times, replaced {}, world matrices moved {}; scene projection {}; {} block sections, {} block "
+                        "triangles drawn, atlas {}, scene z mode {}",
+                        g_viewSets, g_viewReplaced, g_worldCorrected, g_haveProj ? "seen" : "not seen", g_sections.size(), g_trianglesDrawn,
+                        g_atlas ? "yes" : "no", g_sceneZEnable);
+            g_viewSets = g_viewReplaced = g_worldCorrected = g_trianglesDrawn = 0;
         }
         g_haveView = g_haveProj = false;  // MP2 sets them again each frame
         return g_origPresent(device, src, dst, window, dirty);
@@ -485,39 +494,96 @@ namespace
         return g_origReset(device, params);
     }
 
+    // Row-vector 4x4 helpers for rigid transforms.
+    Matrix Multiply(const Matrix& a, const Matrix& b)
+    {
+        Matrix r{};
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                r.m[i][j] = a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j] + a.m[i][3] * b.m[3][j];
+        return r;
+    }
+
+    Matrix RigidInverse(const Matrix& a)
+    {
+        Matrix r{};
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                r.m[i][j] = a.m[j][i];
+        for (int j = 0; j < 3; ++j)
+            r.m[3][j] = -(a.m[3][0] * r.m[0][j] + a.m[3][1] * r.m[1][j] + a.m[3][2] * r.m[2][j]);
+        r.m[3][3] = 1.0f;
+        return r;
+    }
+
+    bool IsIdentity(const Matrix& m)
+    {
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j)
+                if (std::fabs(m.m[i][j] - (i == j ? 1.0f : 0.0f)) > 1e-5f)
+                    return false;
+        return true;
+    }
+
+
+    using SetRenderStateFn = HRESULT(__stdcall*)(void*, UINT, DWORD);
+    SetRenderStateFn g_origSetRenderState = nullptr;
+
+    HRESULT __stdcall SetRenderState(void* device, UINT state, DWORD value)
+    {
+        if (!g_ownDraw && state == kRsZEnable && g_perspectiveActive && value)
+            g_sceneZEnable = value;
+        return g_origSetRenderState(device, state, value);
+    }
+
     HRESULT __stdcall SetTransform(void* device, UINT state, const Matrix* matrix)
     {
-        // Keep the view that goes with the scene's perspective projection, not a HUD pass's
-        // (2D passes set an orthographic projection and often an identity view).
+        if (g_ownDraw || !matrix)
+            return g_origSetTransform(device, state, matrix);
+
+        // MP2 draws in two ways: most of the scene with a real view matrix, and some objects
+        // (doors, props...) with an identity view and the camera baked into their world matrix.
+        // The first gets Minecraft's eye as its view; the second gets its world matrix moved from
+        // MP2's camera to ours: world * inverse(mp2View) * ourView.
         static Matrix pendingView{};
         static bool   perspective = false;
-        static Matrix ours{};
-        if (matrix && state == kTsView) {
-            const Runtime& st = State();
-            const bool identity = matrix->m[0][0] == 1.0f && matrix->m[1][1] == 1.0f && matrix->m[2][2] == 1.0f && matrix->m[3][0] == 0.0f &&
-                                  matrix->m[3][1] == 0.0f && matrix->m[3][2] == 0.0f && matrix->m[0][1] == 0.0f && matrix->m[1][0] == 0.0f;
+        static bool   viewIsIdentity = false;
+        static Matrix ours{}, correction{}, corrected{};
+        static bool   haveCorrection = false;
+        const Runtime& st = State();
+
+        if (state == kTsView) {
             ++g_viewSets;
-            if (st.cameraValid && !identity) {
+            viewIsIdentity = IsIdentity(*matrix);
+            if (st.cameraValid && !viewIsIdentity) {
                 Matrix unusedProj{};
                 ComputeCamera(st, ours, unusedProj, 16, 9);
+                correction = Multiply(RigidInverse(*matrix), ours);
+                haveCorrection = true;
                 matrix = &ours;
                 ++g_viewReplaced;
             }
+        } else if (state == kTsWorld && viewIsIdentity && perspective && st.cameraValid && haveCorrection) {
+            corrected = Multiply(*matrix, correction);
+            matrix = &corrected;
+            ++g_worldCorrected;
         }
-        if (matrix) {
-            if (state == kTsView) {
-                pendingView = *matrix;
-                if (perspective) {
-                    g_view = *matrix;
-                    g_haveView = true;
-                }
-            } else if (state == kTsProjection) {
-                perspective = matrix->m[2][3] != 0.0f && matrix->m[3][3] == 0.0f;
-                if (perspective) {
-                    g_proj = *matrix;
-                    g_view = pendingView;
-                    g_haveProj = g_haveView = true;
-                }
+        if (!st.cameraValid)
+            haveCorrection = false;
+
+        if (state == kTsView) {
+            pendingView = *matrix;
+            if (perspective) {
+                g_view = *matrix;
+                g_haveView = true;
+            }
+        } else if (state == kTsProjection) {
+            perspective = matrix->m[2][3] != 0.0f && matrix->m[3][3] == 0.0f;
+            g_perspectiveActive = perspective;
+            if (perspective) {
+                g_proj = *matrix;
+                g_view = pendingView;
+                g_haveProj = g_haveView = true;
             }
         }
         return g_origSetTransform(device, state, matrix);
@@ -544,6 +610,7 @@ namespace
             InstallHook(VSlot(device, dev::Present), reinterpret_cast<void*>(&Present), g_origPresent, "IDirect3DDevice8::Present");
             InstallHook(VSlot(device, dev::Reset), reinterpret_cast<void*>(&Reset), g_origReset, "IDirect3DDevice8::Reset");
             InstallHook(VSlot(device, dev::SetTransform), reinterpret_cast<void*>(&SetTransform), g_origSetTransform, "IDirect3DDevice8::SetTransform");
+            InstallHook(VSlot(device, dev::SetRenderState), reinterpret_cast<void*>(&SetRenderState), g_origSetRenderState, "IDirect3DDevice8::SetRenderState");
         }
         return hr;
     }

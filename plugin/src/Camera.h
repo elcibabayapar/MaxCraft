@@ -7,4 +7,6 @@ namespace camera
     bool Install();
     // A scripted camera path (cut-scene, level intro) is running: MP2 keeps the camera and Max.
     bool PathActive();
+    // What MP2's camera follows this frame (X_CameraImplementation::update's target).
+    const void* Target();
 }

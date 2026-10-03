@@ -63,6 +63,8 @@ namespace
     DWORD         g_lastFrameTick = 0;
     McPoint       g_playerMc{};  // where MP2 has Max right now (Minecraft coords)
     bool          g_playerMcValid = false;
+    bool          g_playerByCamera = false;  // found through MP2's camera target
+    bool          g_playerNamed = false;     // fallback pick has a Max / Mona skin
     DWORD         g_lastStatusLog = 0;
 
     Tracked& Track(X_Character* c)
@@ -186,15 +188,10 @@ namespace
         static std::vector<proto::ActorRecord> records;
         records.clear();
         const DWORD now = GetTickCount();
-        for (auto it = g_chars.begin(); it != g_chars.end();) {
-            if (now - it->second.lastSeen > kStaleMs) {
-                it = g_chars.erase(it);
-                continue;
-            }
-            X_Character* c = it->first;
-            Tracked&     t = it->second;
-            ++it;
-            if (c == st.player || records.size() >= proto::kMaxActors)
+        for (auto& entry : g_chars) {
+            X_Character* c = entry.first;
+            Tracked&     t = entry.second;
+            if (now - t.lastSeen > kStaleMs || c == st.player || records.size() >= proto::kMaxActors)
                 continue;
             McPoint p;
             float   yaw = 0.0f;
@@ -437,11 +434,23 @@ namespace
     {
         auto& st = State();
         Track(self);
-        const auto known = st.player ? g_chars.find(st.player) : g_chars.end();
-        if (known == g_chars.end() || GetTickCount() - known->second.lastSeen > kStaleMs) {
-            if (self != st.player && IsPlayerCandidate(self)) {
+        const auto  known = st.player ? g_chars.find(st.player) : g_chars.end();
+        const bool  stale = known == g_chars.end() || GetTickCount() - known->second.lastSeen > kStaleMs;
+        const auto  target = reinterpret_cast<std::uintptr_t>(camera::Target());
+        const auto  me = reinterpret_cast<std::uintptr_t>(self);
+        const bool  followed = target && target >= me && target - me < 0x4000;
+        if (self != st.player) {
+            const std::string& name = g_chars[self].name;
+            const bool         named = (name.find("MaxPayne") != std::string::npos || name.find("Mona") != std::string::npos) &&
+                               name.find("Enemy") == std::string::npos;
+            if (followed && !camera::PathActive()) {
                 st.player = self;
-                mclog::Info("player is #{} ({})", g_chars[self].id, g_chars[self].name);
+                g_playerByCamera = true;
+                mclog::Info("player is #{} ({}): MP2's camera follows it (+{:#x})", g_chars[self].id, name, target - me);
+            } else if (!g_playerByCamera && (stale || (named && !g_playerNamed)) && IsPlayerCandidate(self)) {
+                st.player = self;
+                g_playerNamed = named;
+                mclog::Info("player is #{} ({}): input-driven, AI off", g_chars[self].id, name);
             }
         }
         if (self == st.player)
@@ -498,6 +507,7 @@ void characters::OnLevelChange()
     auto& st = State();
     g_chars.clear();
     st.player = nullptr;
+    g_playerByCamera = g_playerNamed = false;
     st.puppeting = false;
     st.minecraftOwnsPlayer = false;
     st.gameOwnsInput = true;

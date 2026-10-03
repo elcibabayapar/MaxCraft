@@ -20,10 +20,8 @@ Mapping& Mapping::Get()
         m.flip_ = cfg.flipZ;
         if (cfg.upAxis >= 0 && cfg.upAxis <= 2)
             m.up_ = cfg.upAxis;
-        if (cfg.unitsPerBlock > 0.0f) {
-            m.units_ = cfg.unitsPerBlock;
-            m.calibrated_ = cfg.upAxis >= 0;
-        }
+        m.units_ = cfg.unitsPerBlock > 0.0f ? cfg.unitsPerBlock : 1.0f;
+        m.calibrated_ = cfg.upAxis >= 0;
         m.Rebuild();
         return m;
     }();
@@ -59,8 +57,8 @@ void Mapping::Calibrate(const mp2::Vec3& a, const mp2::Vec3& b, float radius)
             if (std::fabs(d[i]) > std::fabs(d[up_]))
                 up_ = i;
     }
-    if (cfg.unitsPerBlock <= 0.0f)
-        units_ = height / kPlayerHeightBlocks;
+    units_ = cfg.unitsPerBlock > 0.0f ? cfg.unitsPerBlock : 1.0f;  // MaxFX units are metres
+    (void)kPlayerHeightBlocks;
     calibrated_ = true;
     Rebuild();
     mclog::Info("calibration: capsule {:.3f} tall (len {:.3f}, r {:.3f}) -> {:.4f} units per block, up axis {}, flipZ {}",

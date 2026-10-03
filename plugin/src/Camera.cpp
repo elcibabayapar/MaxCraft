@@ -25,13 +25,15 @@ namespace
     DeinitLevelFn g_origDeinit = nullptr;
     VisibilityFn  g_origVisibility = nullptr;
 
-    std::atomic<bool> g_pathActive{ false };
+    std::atomic<bool>        g_pathActive{ false };
+    std::atomic<const void*> g_target{ nullptr };
     float             g_savedFov = -1.0f;
     bool              g_fovInRadians = true;
 
     void __fastcall Update(X_CameraImplementation* self, void*, const X_CameraTarget* target, const X_TimeUpdate& time)
     {
         g_origUpdate(self, target, time);
+        g_target = target;
         bool path = false;
         Guarded([&] { path = api.isCameraPathActive(self); });
         g_pathActive = path;
@@ -104,4 +106,9 @@ bool camera::Install()
 bool camera::PathActive()
 {
     return g_pathActive;
+}
+
+const void* camera::Target()
+{
+    return g_target;
 }

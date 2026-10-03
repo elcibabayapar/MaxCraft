@@ -30,6 +30,7 @@ namespace
     // line up with its picture and depth buffer.
     Matrix g_view{}, g_proj{};
     bool   g_haveView = false, g_haveProj = false;
+    UINT   g_viewSets = 0, g_viewReplaced = 0;  // per 5 s, for the log
 
     struct Vertex
     {
@@ -464,6 +465,13 @@ namespace
                     VCall<dev::ApplyStateBlock>(device, g_stateBlock);
             }
         }
+        static DWORD lastLog = 0;
+        if (GetTickCount() - lastLog > 5000) {
+            lastLog = GetTickCount();
+            mclog::Info("render: view set {} times, replaced {}; scene projection {}; {} block sections", g_viewSets, g_viewReplaced,
+                        g_haveProj ? "seen" : "not seen", g_sections.size());
+            g_viewSets = g_viewReplaced = 0;
+        }
         g_haveView = g_haveProj = false;  // MP2 sets them again each frame
         return g_origPresent(device, src, dst, window, dirty);
     }
@@ -483,6 +491,19 @@ namespace
         // (2D passes set an orthographic projection and often an identity view).
         static Matrix pendingView{};
         static bool   perspective = false;
+        static Matrix ours{};
+        if (matrix && state == kTsView) {
+            const Runtime& st = State();
+            const bool identity = matrix->m[0][0] == 1.0f && matrix->m[1][1] == 1.0f && matrix->m[2][2] == 1.0f && matrix->m[3][0] == 0.0f &&
+                                  matrix->m[3][1] == 0.0f && matrix->m[3][2] == 0.0f && matrix->m[0][1] == 0.0f && matrix->m[1][0] == 0.0f;
+            ++g_viewSets;
+            if (st.cameraValid && !identity) {
+                Matrix unusedProj{};
+                ComputeCamera(st, ours, unusedProj, 16, 9);
+                matrix = &ours;
+                ++g_viewReplaced;
+            }
+        }
         if (matrix) {
             if (state == kTsView) {
                 pendingView = *matrix;

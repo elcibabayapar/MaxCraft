@@ -296,40 +296,46 @@ namespace
     }
 }
 
+namespace
+{
+    // Hooked as the game creates them (no DirectInput objects of our own at startup).
+    using DiCreateFn = HRESULT(__stdcall*)(HINSTANCE, DWORD, void**, void*);
+    using DiCreateDeviceFn = HRESULT(__stdcall*)(void*, const GUID&, void**, void*);
+    DiCreateFn       g_origDiCreate = nullptr;
+    DiCreateDeviceFn g_origDiCreateDevice = nullptr;
+    bool             g_deviceHooked = false;
+
+    HRESULT __stdcall DiCreateDevice(void* di, const GUID& guid, void** out, void* outer)
+    {
+        const HRESULT hr = g_origDiCreateDevice(di, guid, out, outer);
+        if (SUCCEEDED(hr) && out && *out && !g_deviceHooked) {
+            g_deviceHooked = true;
+            void** vtable = *static_cast<void***>(*out);
+            InstallHook(vtable[9], reinterpret_cast<void*>(&GetDeviceState), g_origGetDeviceState, "IDirectInputDevice::GetDeviceState");
+            InstallHook(vtable[10], reinterpret_cast<void*>(&GetDeviceData), g_origGetDeviceData, "IDirectInputDevice::GetDeviceData");
+            InstallHook(vtable[11], reinterpret_cast<void*>(&SetDataFormat), g_origSetDataFormat, "IDirectInputDevice::SetDataFormat");
+        }
+        return hr;
+    }
+
+    HRESULT __stdcall DiCreate(HINSTANCE instance, DWORD version, void** out, void* outer)
+    {
+        const HRESULT hr = g_origDiCreate(instance, version, out, outer);
+        if (SUCCEEDED(hr) && out && *out && !g_origDiCreateDevice)
+            InstallHook((*static_cast<void***>(*out))[3], reinterpret_cast<void*>(&DiCreateDevice), g_origDiCreateDevice, "IDirectInput::CreateDevice");
+        return hr;
+    }
+}
+
 bool input::Install()
 {
     HMODULE dinput = LoadLibraryW(L"dinput.dll");
-    using CreateFn = HRESULT(__stdcall*)(HINSTANCE, DWORD, void**, void*);
-    auto create = dinput ? reinterpret_cast<CreateFn>(GetProcAddress(dinput, "DirectInputCreateA")) : nullptr;
+    void*   create = dinput ? reinterpret_cast<void*>(GetProcAddress(dinput, "DirectInputCreateA")) : nullptr;
     if (!create) {
         mclog::Info("input: DirectInputCreateA not found");
         return false;
     }
-    void* di = nullptr;
-    for (DWORD version : { 0x0700u, 0x0500u, 0x0300u })
-        if (SUCCEEDED(create(GetModuleHandleW(nullptr), version, &di, nullptr)) && di)
-            break;
-    if (!di) {
-        mclog::Info("input: DirectInputCreateA failed");
-        return false;
-    }
-    static const GUID kSysKeyboard = { 0x6F1D2B61, 0xD5A0, 0x11CF, { 0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
-    using CreateDeviceFn = HRESULT(__stdcall*)(void*, const GUID&, void**, void*);
-    void* device = nullptr;
-    const auto createDevice = reinterpret_cast<CreateDeviceFn>((*static_cast<void***>(di))[3]);
-    if (FAILED(createDevice(di, kSysKeyboard, &device, nullptr)) || !device) {
-        mclog::Info("input: CreateDevice failed");
-        reinterpret_cast<ULONG(__stdcall*)(void*)>((*static_cast<void***>(di))[2])(di);
-        return false;
-    }
-    void** vtable = *static_cast<void***>(device);
-    bool   ok = true;
-    ok &= InstallHook(vtable[9], reinterpret_cast<void*>(&GetDeviceState), g_origGetDeviceState, "IDirectInputDevice::GetDeviceState");
-    ok &= InstallHook(vtable[10], reinterpret_cast<void*>(&GetDeviceData), g_origGetDeviceData, "IDirectInputDevice::GetDeviceData");
-    ok &= InstallHook(vtable[11], reinterpret_cast<void*>(&SetDataFormat), g_origSetDataFormat, "IDirectInputDevice::SetDataFormat");
-    reinterpret_cast<ULONG(__stdcall*)(void*)>(vtable[2])(device);
-    reinterpret_cast<ULONG(__stdcall*)(void*)>((*static_cast<void***>(di))[2])(di);
-    return ok;
+    return InstallHook(create, reinterpret_cast<void*>(&DiCreate), g_origDiCreate, "DirectInputCreateA");
 }
 
 void input::AttachWindow(HWND window)

@@ -503,50 +503,46 @@ namespace
     }
 }
 
+namespace
+{
+    // No throwaway device of our own: creating one while MP2's launcher checks the display
+    // adapter makes that check fail. Instead the game's own objects are hooked as they appear:
+    // Direct3DCreate8 -> IDirect3D8::CreateDevice -> the device's vtable.
+    using Create8Fn = void*(__stdcall*)(UINT);
+    using CreateDeviceFn = HRESULT(__stdcall*)(void*, UINT, UINT, HWND, DWORD, PresentParameters*, void**);
+    Create8Fn      g_origCreate8 = nullptr;
+    CreateDeviceFn g_origCreateDevice = nullptr;
+    bool           g_deviceHooked = false;
+
+    HRESULT __stdcall CreateDevice(void* d3d, UINT adapter, UINT type, HWND window, DWORD flags, PresentParameters* params, void** out)
+    {
+        const HRESULT hr = g_origCreateDevice(d3d, adapter, type, window, flags, params, out);
+        if (SUCCEEDED(hr) && out && *out && !g_deviceHooked) {
+            g_deviceHooked = true;
+            void* device = *out;
+            InstallHook(VSlot(device, dev::Present), reinterpret_cast<void*>(&Present), g_origPresent, "IDirect3DDevice8::Present");
+            InstallHook(VSlot(device, dev::Reset), reinterpret_cast<void*>(&Reset), g_origReset, "IDirect3DDevice8::Reset");
+            InstallHook(VSlot(device, dev::SetTransform), reinterpret_cast<void*>(&SetTransform), g_origSetTransform, "IDirect3DDevice8::SetTransform");
+        }
+        return hr;
+    }
+
+    void* __stdcall Create8(UINT version)
+    {
+        void* d3d = g_origCreate8(version);
+        if (d3d && !g_origCreateDevice)
+            InstallHook(VSlot(d3d, d3d::CreateDevice), reinterpret_cast<void*>(&CreateDevice), g_origCreateDevice, "IDirect3D8::CreateDevice");
+        return d3d;
+    }
+}
+
 bool render::Install()
 {
     HMODULE d3d8 = LoadLibraryW(L"d3d8.dll");
-    using CreateFn = void*(__stdcall*)(UINT);
-    auto create = d3d8 ? reinterpret_cast<CreateFn>(GetProcAddress(d3d8, "Direct3DCreate8")) : nullptr;
+    void*   create = d3d8 ? reinterpret_cast<void*>(GetProcAddress(d3d8, "Direct3DCreate8")) : nullptr;
     if (!create) {
         mclog::Info("render: Direct3DCreate8 not found");
         return false;
     }
-    void* d3d = create(kSdkVersion);
-    if (!d3d) {
-        mclog::Info("render: Direct3DCreate8 failed");
-        return false;
-    }
-
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = DefWindowProcW;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"MaxCraftDummy";
-    RegisterClassW(&wc);
-    HWND window = CreateWindowExW(0, wc.lpszClassName, L"", WS_OVERLAPPEDWINDOW, 0, 0, 64, 64, nullptr, nullptr, wc.hInstance, nullptr);
-
-    DisplayMode mode{};
-    VCall<d3d::GetAdapterDisplayMode>(d3d, 0u, &mode);
-    PresentParameters pp{};
-    pp.Windowed = TRUE;
-    pp.SwapEffect = kSwapDiscard;
-    pp.BackBufferFormat = mode.Format;
-    pp.hDeviceWindow = window;
-    void*   device = nullptr;
-    HRESULT hr = VCall<d3d::CreateDevice>(d3d, 0u, UINT(kDevTypeHal), window, DWORD(kCreateSoftwareVp), &pp, &device);
-    if (FAILED(hr) || !device) {
-        mclog::Info("render: dummy device failed ({:#x})", static_cast<unsigned>(hr));
-        Release(d3d);
-        DestroyWindow(window);
-        return false;
-    }
-
-    bool ok = true;
-    ok &= InstallHook(VSlot(device, dev::Present), reinterpret_cast<void*>(&Present), g_origPresent, "IDirect3DDevice8::Present");
-    ok &= InstallHook(VSlot(device, dev::Reset), reinterpret_cast<void*>(&Reset), g_origReset, "IDirect3DDevice8::Reset");
-    ok &= InstallHook(VSlot(device, dev::SetTransform), reinterpret_cast<void*>(&SetTransform), g_origSetTransform, "IDirect3DDevice8::SetTransform");
-    Release(device);
-    Release(d3d);
-    DestroyWindow(window);
-    return ok;
+    return InstallHook(create, reinterpret_cast<void*>(&Create8), g_origCreate8, "Direct3DCreate8");
 }

@@ -25,10 +25,9 @@ namespace
             mclog::Info("unsupported Max Payne 2 version: MaxCraft stays inactive");
             return 0;
         }
-        if (!Link::Get().Create()) {
-            mclog::Info("no shared memory: MaxCraft stays inactive");
-            return 0;
-        }
+        // The shared memory (~120 MB of views) is mapped at MP2's first frame, not here: taking that
+        // much of a 32-bit address space while MP2 makes its own big startup allocations made one of
+        // them fail (crash reading address 0 at maxpayne2.exe+0x1b80, on some launches).
         if (MH_Initialize() != MH_OK) {
             mclog::Info("MinHook failed to initialize");
             return 0;

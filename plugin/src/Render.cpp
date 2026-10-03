@@ -570,6 +570,13 @@ namespace
             g_stateBlock = 0;
             g_device = device;
         }
+        // Shared memory, once MP2 is up (see main.cpp).
+        static bool linkTried = false;
+        if (!linkTried) {
+            linkTried = true;
+            if (!Link::Get().Create())
+                mclog::Info("no shared memory: Minecraft can't connect this session");
+        }
         // Minecraft starts once a level is actually running (the player updating), not during MP2's
         // loading: its boot storm (JVM, disk, the launcher's window) while a level loads crashed MP2
         // inside its own loader twice now. A 60 s fallback keeps it starting even if the player is

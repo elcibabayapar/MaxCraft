@@ -69,6 +69,11 @@ namespace
     DWORD         g_lastFrameTick = 0;
     McPoint       g_playerMc{};  // where MP2 has Max right now (Minecraft coords)
     bool          g_playerMcValid = false;
+    // Minecraft's player walked off MP2's level: Max stays at his last place inside it (MP2 kills
+    // him out there) and Minecraft is put back next to him, still looking where it looked.
+    bool          g_outsideLevel = false;
+    DWORD         g_lastBorderTeleport = 0;
+    bool          g_keepLook = false;
     bool          g_playerByCamera = false;  // found through MP2's camera target
     bool          g_playerNamed = false;     // fallback pick has a Max / Mona skin
     DWORD         g_lastStatusLog = 0;
@@ -358,6 +363,17 @@ namespace
         }
         g_takeover = takeover;
 
+        // Off the edge of the level: back to where Max still is.
+        if (g_outsideLevel) {
+            g_outsideLevel = false;
+            if (nowTick - g_lastBorderTeleport > 500) {
+                g_lastBorderTeleport = nowTick;
+                g_teleportPending = true;
+                g_keepLook = true;
+                mclog::Info("world border: Minecraft's player left MP2's level; putting them back by Max");
+            }
+        }
+
         // MP2 moved Max itself (level start, script, loaded save): resync Minecraft.
         float maxYaw = 0.0f;
         const bool haveFeet = FeetOf(player, g_playerMc, &maxYaw);
@@ -374,8 +390,11 @@ namespace
             if (g_teleportPending)
                 ++g_teleportSeq;
             g_teleportPending = false;
-            st.yaw = maxYaw;
-            st.pitch = 0.0f;
+            if (!g_keepLook || !st.lookInitialized) {
+                st.yaw = maxYaw;
+                st.pitch = 0.0f;
+            }
+            g_keepLook = false;
             st.lookInitialized = true;
         }
 
@@ -428,6 +447,10 @@ namespace
     // Minecraft's feet -> Max, after MP2's own physics (which we skipped) so nothing overrides it.
     void ApplyPuppet(X_Character* player)
     {
+        if (!collision::InsideLevel({ State().feetX, State().feetY, State().feetZ })) {
+            g_outsideLevel = true;
+            return;
+        }
         auto&            st = State();
         auto&            map = Mapping::Get();
         const auto&      cfg = Config::Get();

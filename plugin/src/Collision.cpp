@@ -331,6 +331,62 @@ void collision::Reset(std::uint32_t epoch)
     g_jobCv.notify_one();
 }
 
+namespace
+{
+    std::unordered_set<std::uint64_t> g_columns;  // game thread
+    std::uint32_t                     g_columnsVersion = ~0u;
+    std::uint32_t                     g_columnsEpoch = ~0u;
+
+    std::uint64_t ColumnKey(int x, int z)
+    {
+        return (std::uint64_t(std::uint32_t(x)) << 32) | std::uint32_t(z);
+    }
+
+    void BuildColumns()
+    {
+        std::vector<std::array<Vec3, 3>> copy;
+        {
+            std::lock_guard lock(g_geoMutex);
+            copy = g_mpTris;
+        }
+        g_columns.clear();
+        auto& map = Mapping::Get();
+        for (const auto& tri : copy) {
+            double lo[2] = { 1e30, 1e30 }, hi[2] = { -1e30, -1e30 };
+            for (const auto& v : tri) {
+                const McPoint p = map.ToMc(v);
+                lo[0] = (std::min)(lo[0], p.x), hi[0] = (std::max)(hi[0], p.x);
+                lo[1] = (std::min)(lo[1], p.z), hi[1] = (std::max)(hi[1], p.z);
+            }
+            const int x0 = static_cast<int>(std::floor(lo[0])), x1 = static_cast<int>(std::floor(hi[0]));
+            const int z0 = static_cast<int>(std::floor(lo[1])), z1 = static_cast<int>(std::floor(hi[1]));
+            if ((x1 - x0 + 1) * (z1 - z0 + 1) > 65536)
+                continue;
+            for (int x = x0; x <= x1; ++x)
+                for (int z = z0; z <= z1; ++z)
+                    g_columns.insert(ColumnKey(x, z));
+        }
+        mclog::Info("level footprint: {} block columns", g_columns.size());
+    }
+}
+
+bool collision::InsideLevel(const McPoint& p)
+{
+    if (g_columnsVersion != g_geoVersion || g_columnsEpoch != g_epoch) {
+        g_columnsVersion = g_geoVersion;
+        g_columnsEpoch = g_epoch;
+        BuildColumns();
+    }
+    if (g_columns.empty())
+        return true;
+    const int x = static_cast<int>(std::floor(p.x)), z = static_cast<int>(std::floor(p.z));
+    for (int dx = -1; dx <= 1; ++dx)
+        for (int dz = -1; dz <= 1; ++dz)
+            if (g_columns.contains(ColumnKey(x + dx, z + dz)))
+                return true;
+    return false;
+}
+
 void collision::ClearGeometry()
 {
     std::lock_guard lock(g_geoMutex);

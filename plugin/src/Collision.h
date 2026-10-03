@@ -20,4 +20,8 @@ namespace collision
     void ClearGeometry();
     // Game thread, every frame: queue the regions around the player that Minecraft doesn't have yet.
     void Update(const McPoint& player);
+    // Whether a Minecraft position is inside the level: some of MP2's geometry stands in its column
+    // (or a neighbouring one). Outside it MP2 kills Max, so Minecraft may not take him there.
+    // True while the level's geometry isn't known yet.
+    bool InsideLevel(const McPoint& p);
 }

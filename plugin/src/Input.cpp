@@ -76,9 +76,27 @@ namespace
     using SetDataFormatFn = HRESULT(__stdcall*)(void*, const DataFormat*);
     using GetDeviceStateFn = HRESULT(__stdcall*)(void*, DWORD, void*);
     using GetDeviceDataFn = HRESULT(__stdcall*)(void*, DWORD, ObjectData*, DWORD*, DWORD);
-    SetDataFormatFn  g_origSetDataFormat = nullptr;
-    GetDeviceStateFn g_origGetDeviceState = nullptr;
-    GetDeviceDataFn  g_origGetDeviceData = nullptr;
+
+    // Keyboard and mouse can be different classes with different vtables, so each vtable gets
+    // patched (slots 9-11) with its own originals kept here.
+    struct DeviceVtable
+    {
+        GetDeviceStateFn state;
+        GetDeviceDataFn  data;
+        SetDataFormatFn  format;
+    };
+    std::mutex                               g_vtableMutex;
+    std::unordered_map<void**, DeviceVtable> g_vtables;
+
+    DeviceVtable Originals(void* device)
+    {
+        std::lock_guard lock(g_vtableMutex);
+        return g_vtables[*static_cast<void***>(device)];
+    }
+
+    // Mouse activity, for the log.
+    std::atomic<int> g_mouseStateCalls{ 0 }, g_mouseDataItems{ 0 }, g_mouseMoved{ 0 };
+    ULONGLONG        g_lastInputLog = 0;
 
     std::mutex                       g_kindMutex;
     std::unordered_map<void*, Kind>  g_kinds;
@@ -180,12 +198,17 @@ namespace
             std::lock_guard lock(g_kindMutex);
             g_kinds[self] = kind;
         }
-        return g_origSetDataFormat(self, format);
+        return Originals(self).format(self, format);
     }
 
     HRESULT __stdcall GetDeviceState(void* self, DWORD bytes, void* data)
     {
-        const HRESULT hr = g_origGetDeviceState(self, bytes, data);
+        const HRESULT hr = Originals(self).state(self, bytes, data);
+        if (GetTickCount64() - g_lastInputLog > 5000) {
+            g_lastInputLog = GetTickCount64();
+            mclog::Info("input: mouse GetDeviceState {}x, buffered items {}, moved {}x, routed to Minecraft {}", g_mouseStateCalls.exchange(0),
+                        g_mouseDataItems.exchange(0), g_mouseMoved.exchange(0), Routed());
+        }
         if (FAILED(hr) || !data)
             return hr;
         const auto& cfg = Config::Get();
@@ -210,6 +233,9 @@ namespace
                 auto*       m = static_cast<MouseState*>(data);
                 const DWORD buttons = bytes >= 20 ? 8 : 4;
                 g_lastMouseStateMs = GetTickCount64();
+                ++g_mouseStateCalls;
+                if (m->lX || m->lY)
+                    ++g_mouseMoved;
                 HandleMove(m->lX, m->lY, m->lZ);
                 for (DWORD i = 0; i < buttons; ++i)
                     HandleButton(static_cast<int>(i), (m->rgbButtons[i] & 0x80) != 0);
@@ -230,7 +256,7 @@ namespace
 
     HRESULT __stdcall GetDeviceData(void* self, DWORD objectBytes, ObjectData* items, DWORD* inOut, DWORD flags)
     {
-        const HRESULT hr = g_origGetDeviceData(self, objectBytes, items, inOut, flags);
+        const HRESULT hr = Originals(self).data(self, objectBytes, items, inOut, flags);
         constexpr DWORD kPeek = 1;
         if (FAILED(hr) || !items || !inOut || (flags & kPeek) || objectBytes < sizeof(ObjectData))
             return hr;
@@ -254,6 +280,7 @@ namespace
                 }
             } else {
                 // Movement comes from GetDeviceState when the game polls that too.
+                ++g_mouseDataItems;
                 const bool polled = GetTickCount64() - g_lastMouseStateMs < 200;
                 if (item->dwOfs == kMouseOfsX && !polled)
                     HandleMove(static_cast<LONG>(item->dwData), 0, 0);
@@ -303,17 +330,30 @@ namespace
     using DiCreateDeviceFn = HRESULT(__stdcall*)(void*, const GUID&, void**, void*);
     DiCreateFn       g_origDiCreate = nullptr;
     DiCreateDeviceFn g_origDiCreateDevice = nullptr;
-    bool             g_deviceHooked = false;
+
+    void PatchSlot(void** vtable, int slot, void* fn)
+    {
+        DWORD old = 0;
+        if (VirtualProtect(&vtable[slot], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+            vtable[slot] = fn;
+            VirtualProtect(&vtable[slot], sizeof(void*), old, &old);
+        }
+    }
 
     HRESULT __stdcall DiCreateDevice(void* di, const GUID& guid, void** out, void* outer)
     {
         const HRESULT hr = g_origDiCreateDevice(di, guid, out, outer);
-        if (SUCCEEDED(hr) && out && *out && !g_deviceHooked) {
-            g_deviceHooked = true;
-            void** vtable = *static_cast<void***>(*out);
-            InstallHook(vtable[9], reinterpret_cast<void*>(&GetDeviceState), g_origGetDeviceState, "IDirectInputDevice::GetDeviceState");
-            InstallHook(vtable[10], reinterpret_cast<void*>(&GetDeviceData), g_origGetDeviceData, "IDirectInputDevice::GetDeviceData");
-            InstallHook(vtable[11], reinterpret_cast<void*>(&SetDataFormat), g_origSetDataFormat, "IDirectInputDevice::SetDataFormat");
+        if (SUCCEEDED(hr) && out && *out) {
+            void**          vtable = *static_cast<void***>(*out);
+            std::lock_guard lock(g_vtableMutex);
+            if (!g_vtables.contains(vtable) && vtable[9] != reinterpret_cast<void*>(&GetDeviceState)) {
+                g_vtables[vtable] = { reinterpret_cast<GetDeviceStateFn>(vtable[9]), reinterpret_cast<GetDeviceDataFn>(vtable[10]),
+                                      reinterpret_cast<SetDataFormatFn>(vtable[11]) };
+                PatchSlot(vtable, 9, reinterpret_cast<void*>(&GetDeviceState));
+                PatchSlot(vtable, 10, reinterpret_cast<void*>(&GetDeviceData));
+                PatchSlot(vtable, 11, reinterpret_cast<void*>(&SetDataFormat));
+                mclog::Info("input: patched device vtable {:p} ({} so far)", static_cast<void*>(vtable), g_vtables.size());
+            }
         }
         return hr;
     }

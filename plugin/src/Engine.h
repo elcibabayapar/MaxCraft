@@ -65,7 +65,9 @@ namespace mp2
         // X_CameraImplementation
         bool(__thiscall* isCameraPathActive)(const X_CameraImplementation*);
 
-        // X_LevelRuntimeCamera
+        // X_LevelRuntimeCamera / P_Camera
+        P_Camera*(__thiscall* getLevelCamera)(X_LevelRuntimeCamera*);
+        const Matrix4x3&(__thiscall* getViewconeMatrix)(const P_Camera*);
         void(__thiscall* setFOV)(X_LevelRuntimeCamera*, float);
         float(__thiscall* getFOV)(const X_LevelRuntimeCamera*);
 

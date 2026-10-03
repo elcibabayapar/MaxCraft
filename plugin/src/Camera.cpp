@@ -44,6 +44,8 @@ namespace
     // -9 when the object holds a 4x3 frame (rotation rows, then the position). 0: not found.
     int  g_rotationOffset = 0;
     bool g_rotationProbed = false;
+    Matrix4x3 g_renderCamera{};
+    DWORD     g_renderCameraTick = 0;
 
     bool Orthonormal(const float* r)
     {
@@ -107,6 +109,46 @@ namespace
         return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
     }
 
+    // Where the camera keeps its rotation: probed once per level around its position field.
+    void ProbeRotation(float* posField)
+    {
+        if (g_rotationProbed)
+            return;
+        g_rotationProbed = true;
+        for (int offset : { -9, 3, -12, -13 }) {
+            if (Orthonormal(posField + offset)) {
+                g_rotationOffset = offset;
+                break;
+            }
+        }
+        const float* r = posField - 9;
+        mclog::Info("render camera: floats before position ({:.3f} {:.3f} {:.3f}) ({:.3f} {:.3f} {:.3f}) ({:.3f} {:.3f} {:.3f}); after "
+                    "({:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}); rotation {}",
+                    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], posField[3], posField[4], posField[5], posField[6], posField[7], posField[8],
+                    g_rotationOffset ? std::format("found at {:+d} floats", g_rotationOffset) : std::string("not found"));
+    }
+
+    // MP2's own camera this frame (before we move it), for drawing blocks when it is the camera.
+    void CaptureRenderCamera(X_LevelRuntimeCamera* self)
+    {
+        P_Camera* camera = nullptr;
+        Guarded([&] { camera = api.getLevelCamera(self); });
+        if (!camera)
+            return;
+        Guarded([&] {
+            const Vec3& pos = api.getObjectPosition(camera);
+            auto*       posField = const_cast<float*>(&pos.x);
+            ProbeRotation(posField);
+            if (!g_rotationOffset)
+                return;
+            const float* r = posField + g_rotationOffset;
+            for (int i = 0; i < 3; ++i)
+                g_renderCamera.row[i] = { r[i * 3 + 0], r[i * 3 + 1], r[i * 3 + 2] };
+            g_renderCamera.row[3] = pos;
+            g_renderCameraTick = GetTickCount();
+        });
+    }
+
     void MoveRenderCamera(X_LevelRuntimeCamera* self, const Matrix4x3& ours, bool log)
     {
         P_Camera* camera = nullptr;
@@ -130,23 +172,8 @@ namespace
                 g_viewconeMode = camToWorld ? ViewconeMode::kCameraToWorld : ViewconeMode::kNone;
                 mclog::Info("render camera: viewcone is {}", camToWorld ? "camera-to-world: following Minecraft's eye" : "not recognised: position only");
             }
-            // The rotation: probe the floats around the position field once per level.
             auto* posField = const_cast<float*>(&pos.x);
-            if (!g_rotationProbed) {
-                g_rotationProbed = true;
-                for (int offset : { -9, 3, -12, -13 }) {
-                    if (Orthonormal(posField + offset)) {
-                        g_rotationOffset = offset;
-                        break;
-                    }
-                }
-                const float* r = posField - 9;
-                mclog::Info("render camera: floats before position ({:.3f} {:.3f} {:.3f}) ({:.3f} {:.3f} {:.3f}) ({:.3f} {:.3f} {:.3f}); after "
-                            "({:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}); rotation {}",
-                            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], posField[3], posField[4], posField[5], posField[6], posField[7],
-                            posField[8], g_rotationOffset ? std::format("found at {:+d} floats: following Minecraft's look", g_rotationOffset)
-                                                          : std::string("not found: position only"));
-            }
+            ProbeRotation(posField);
             if (g_rotationOffset) {
                 float* r = posField + g_rotationOffset;
                 for (int i = 0; i < 3; ++i) {
@@ -167,6 +194,7 @@ namespace
     void __fastcall UpdateVisibility(X_LevelRuntimeCamera* self, void*)
     {
         auto& st = State();
+        CaptureRenderCamera(self);
         if (st.cameraValid && !g_pathActive) {
             if (g_savedFov < 0.0f) {
                 Guarded([&] { g_savedFov = api.getFOV(self); });
@@ -214,4 +242,12 @@ bool camera::PathActive()
 const void* camera::Target()
 {
     return g_target;
+}
+
+bool camera::RenderCamera(mp2::Matrix4x3& out)
+{
+    if (!g_renderCameraTick || GetTickCount() - g_renderCameraTick > 1000)
+        return false;
+    out = g_renderCamera;
+    return true;
 }

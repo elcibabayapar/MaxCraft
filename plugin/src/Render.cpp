@@ -1,5 +1,6 @@
 #include "Render.h"
 
+#include "Camera.h"
 #include "Characters.h"
 #include "Config.h"
 #include "D3D8.h"
@@ -416,9 +417,32 @@ namespace
 
     // Fallback camera when MP2 didn't hand its matrices to SetTransform (vertex shader path):
     // view from our own camera, projection from Minecraft's FOV.
+    void ComputeCameraFrom(const mp2::Matrix4x3& c, float fovDeg, Matrix& view, Matrix& proj, UINT w, UINT h);
+
     void ComputeCamera(const Runtime& st, Matrix& view, Matrix& proj, UINT w, UINT h)
     {
-        const auto& c = st.camera;
+        ComputeCameraFrom(st.camera, st.fovDeg, view, proj, w, h);
+    }
+
+    // The camera our blocks and entities are drawn from: Minecraft's eye while it is the camera,
+    // else MP2's own (cut-scenes, MP2 holding Max, menus over the world).
+    bool BlocksCamera(const Runtime& st, mp2::Matrix4x3& out)
+    {
+        if (st.cameraValid) {
+            out = st.camera;
+            return true;
+        }
+        return camera::RenderCamera(out);
+    }
+
+    bool HaveBlocksCamera(const Runtime& st)
+    {
+        mp2::Matrix4x3 unused{};
+        return BlocksCamera(st, unused);
+    }
+
+    void ComputeCameraFrom(const mp2::Matrix4x3& c, float fovDeg, Matrix& view, Matrix& proj, UINT w, UINT h)
+    {
         const int   fRow = std::clamp(Config::Get().forwardRow, 0, 2);
         const int   uRow = fRow == 1 ? 2 : 1;
         const int   rRow = 3 - fRow - uRow;
@@ -433,7 +457,7 @@ namespace
         view.m[3][3] = 1.0f;
         const float units = Mapping::Get().UnitsPerBlock();
         const float zn = 0.05f * units, zf = 512.0f * units;
-        const float yScale = 1.0f / std::tan(st.fovDeg * 0.0087266462599716f);
+        const float yScale = 1.0f / std::tan(fovDeg * 0.0087266462599716f);
         const float xScale = yScale * float(h) / float(w);
         proj = {};
         proj.m[0][0] = xScale;
@@ -471,8 +495,11 @@ namespace
         // directly. MP2's own view matrices are rotation-only (its scene rides on identity views with
         // the camera baked into the world matrices — "world matrices moved" in the log), so they
         // carry no eye translation and would displace every block off screen.
-        Matrix view{}, proj{};
-        ComputeCamera(st, view, proj, w, h);
+        Matrix         view{}, proj{};
+        mp2::Matrix4x3 eye{};
+        if (!BlocksCamera(st, eye))
+            return;
+        ComputeCameraFrom(eye, st.fovDeg, view, proj, w, h);
         if (const Matrix* scene = SceneProjection())
             proj = *scene;  // the projection MP2's world was drawn with this frame
         else if (g_haveProj)
@@ -853,10 +880,7 @@ namespace
         const Viewport full{ 0, 0, saved.Width ? saved.Width : 1280u, saved.Height ? saved.Height : 720u, 0.0f, 1.0f };
         VCall<dev::SetViewport>(device, &full);
         g_ownDraw = true;
-        Guarded([&] {
-            if (st.cameraValid)
-                DrawWorld(device, st, full.Width, full.Height);
-        });
+        Guarded([&] { DrawWorld(device, st, full.Width, full.Height); });
         g_ownDraw = false;
         VCall<dev::SetViewport>(device, &saved);
         if (g_stateBlock)
@@ -872,7 +896,7 @@ namespace
     bool ReadyForBlocks()
     {
         const Runtime& st = State();
-        return !g_ownDraw && !g_blocksDrawnThisFrame && g_frameSceneDraws >= 8 && st.cameraValid && st.mcInWorld && !Config::Get().blocksNoDepth;
+        return !g_ownDraw && !g_blocksDrawnThisFrame && g_frameSceneDraws >= 8 && HaveBlocksCamera(st) && st.mcInWorld && !Config::Get().blocksNoDepth;
     }
 
     HRESULT __stdcall EndSceneHook(void* device)
@@ -979,7 +1003,7 @@ namespace
                 if (SUCCEEDED((VCall<dev::BeginScene>(device)))) {
                     g_ownDraw = true;
                     Guarded([&] {
-                        if (st.cameraValid && !g_blocksDrawnThisFrame) {
+                        if (HaveBlocksCamera(st) && !g_blocksDrawnThisFrame) {
                             DrawWorld(device, st, w, h);
                             ++g_drawnAtPresent;
                         }
@@ -1169,6 +1193,10 @@ namespace
         if (state == kTsView) {
             ++g_viewSets;
             viewIsIdentity = IsIdentity(*matrix);
+            if (!viewIsIdentity && perspective) {
+                ++g_frameSceneDraws;
+                NoteSceneProjection();
+            }
             if (st.cameraValid && !viewIsIdentity) {
                 Matrix unusedProj{};
                 ComputeCamera(st, ours, unusedProj, 16, 9);
@@ -1178,16 +1206,15 @@ namespace
                 g_haveCorrection = true;
                 matrix = &ours;
                 ++g_viewReplaced;
-                ++g_frameSceneDraws;
-                if (perspective)
-                    NoteSceneProjection();
             }
-        } else if (state == kTsWorld && viewIsIdentity && perspective && st.cameraValid && haveCorrection) {
-            corrected = Multiply(*matrix, correction);
-            matrix = &corrected;
-            ++g_worldCorrected;
+        } else if (state == kTsWorld && viewIsIdentity && perspective) {
             ++g_frameSceneDraws;
             NoteSceneProjection();
+            if (st.cameraValid && haveCorrection) {
+                corrected = Multiply(*matrix, correction);
+                matrix = &corrected;
+                ++g_worldCorrected;
+            }
         }
         if (!st.cameraValid)
             haveCorrection = g_haveCorrection = false;

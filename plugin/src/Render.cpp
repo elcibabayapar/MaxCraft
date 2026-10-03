@@ -29,6 +29,15 @@ namespace
     ResetFn        g_origReset = nullptr;
     SetTransformFn g_origSetTransform = nullptr;
     BeginSceneFn   g_origBeginScene = nullptr;
+    using ClearFn = HRESULT(__stdcall*)(void*, DWORD, const void*, DWORD, DWORD, float, DWORD);
+    ClearFn        g_origClear = nullptr;
+    // This frame: how much of MP2's 3D scene went by (views replaced / world matrices moved) and
+    // whether the blocks are already in. They go in at the last moment MP2's depth buffer still
+    // holds the world: right before MP2 clears it mid-frame (for its weapon / HUD), else at the end
+    // of its 3D scene, else (no occlusion then) at Present.
+    UINT           g_frameSceneDraws = 0;
+    bool           g_blocksDrawnThisFrame = false;
+    UINT           g_drawnAtClear = 0, g_drawnAtEndScene = 0, g_drawnAtPresent = 0;
     EndSceneFn     g_origEndScene = nullptr;
 
     // MP2's own camera matrices, as it last set them: our blocks use exactly the same ones, so they
@@ -555,11 +564,32 @@ namespace
         return g_origBeginScene(device);
     }
 
+    bool ReadyForBlocks()
+    {
+        const Runtime& st = State();
+        return !g_ownDraw && !g_blocksDrawnThisFrame && g_frameSceneDraws >= 8 && st.cameraValid && st.mcInWorld && !Config::Get().blocksNoDepth;
+    }
+
     HRESULT __stdcall EndSceneHook(void* device)
     {
-        if (Config::Get().drawAtEndScene && g_sceneHadPerspective && State().mcInWorld)
+        if (g_sceneHadPerspective && ReadyForBlocks()) {
             DrawWorldAtEndScene(device);
+            g_blocksDrawnThisFrame = true;
+            ++g_drawnAtEndScene;
+        }
         return g_origEndScene(device);
+    }
+
+    // MP2 clearing its depth buffer after the world is drawn: the blocks go in first.
+    HRESULT __stdcall ClearHook(void* device, DWORD count, const void* rects, DWORD flags, DWORD color, float z, DWORD stencil)
+    {
+        constexpr DWORD kClearZBuffer = 2;
+        if ((flags & kClearZBuffer) && ReadyForBlocks()) {
+            DrawWorldAtEndScene(device);
+            g_blocksDrawnThisFrame = true;
+            ++g_drawnAtClear;
+        }
+        return g_origClear(device, count, rects, flags, color, z, stencil);
     }
 
     HRESULT __stdcall Present(void* device, const RECT* src, const RECT* dst, HWND window, const void* dirty)
@@ -644,8 +674,10 @@ namespace
                 if (SUCCEEDED((VCall<dev::BeginScene>(device)))) {
                     g_ownDraw = true;
                     Guarded([&] {
-                        if (st.cameraValid && !Config::Get().drawAtEndScene)
+                        if (st.cameraValid && !g_blocksDrawnThisFrame) {
                             DrawWorld(device, st, w, h);
+                            ++g_drawnAtPresent;
+                        }
                         DrawOverlay(device, st, w, h);
                     });
                     g_ownDraw = false;
@@ -660,12 +692,17 @@ namespace
         if (GetTickCount() - lastLog > 5000) {
             lastLog = GetTickCount();
             mclog::Info("render: view set {} times, replaced {}, world matrices moved {}; scene projection {}; {} block sections, {} block "
-                        "triangles drawn, atlas {}, scene z mode {}, shader constants moved {}, our draw failures {}",
+                        "triangles drawn (frames drawn before depth clear {}, at scene end {}, at present {}), atlas {}, scene z mode {}, "
+                        "shader constants moved {}, our draw failures {}",
                         g_viewSets, g_viewReplaced, g_worldCorrected, g_haveProj ? "seen" : "not seen", g_sections.size(), g_trianglesDrawn,
+                        g_drawnAtClear, g_drawnAtEndScene, g_drawnAtPresent,
                         g_atlas ? "yes" : "no", g_sceneZEnable, g_constantsMoved, g_drawFailures);
             g_viewSets = g_viewReplaced = g_worldCorrected = g_trianglesDrawn = g_constantsMoved = g_drawFailures = 0;
+            g_drawnAtClear = g_drawnAtEndScene = g_drawnAtPresent = 0;
         }
         g_haveView = g_haveProj = false;  // MP2 sets them again each frame
+        g_frameSceneDraws = 0;
+        g_blocksDrawnThisFrame = false;
         return g_origPresent(device, src, dst, window, dirty);
     }
 
@@ -834,11 +871,13 @@ namespace
                 g_haveCorrection = true;
                 matrix = &ours;
                 ++g_viewReplaced;
+                ++g_frameSceneDraws;
             }
         } else if (state == kTsWorld && viewIsIdentity && perspective && st.cameraValid && haveCorrection) {
             corrected = Multiply(*matrix, correction);
             matrix = &corrected;
             ++g_worldCorrected;
+            ++g_frameSceneDraws;
         }
         if (!st.cameraValid)
             haveCorrection = g_haveCorrection = false;
@@ -895,6 +934,7 @@ namespace
             InstallHook(VSlot(device, dev::Reset), reinterpret_cast<void*>(&Reset), g_origReset, "IDirect3DDevice8::Reset");
             InstallHook(VSlot(device, dev::BeginScene), reinterpret_cast<void*>(&BeginSceneHook), g_origBeginScene, "IDirect3DDevice8::BeginScene");
             InstallHook(VSlot(device, dev::EndScene), reinterpret_cast<void*>(&EndSceneHook), g_origEndScene, "IDirect3DDevice8::EndScene");
+            InstallHook(VSlot(device, dev::Clear), reinterpret_cast<void*>(&ClearHook), g_origClear, "IDirect3DDevice8::Clear");
             InstallHook(VSlot(device, dev::SetTransform), reinterpret_cast<void*>(&SetTransform), g_origSetTransform, "IDirect3DDevice8::SetTransform");
             InstallHook(VSlot(device, dev::SetRenderState), reinterpret_cast<void*>(&SetRenderState), g_origSetRenderState, "IDirect3DDevice8::SetRenderState");
             InstallHook(VSlot(device, dev::SetVertexShaderConstant), reinterpret_cast<void*>(&SetVertexShaderConstant), g_origSetVsConstant,

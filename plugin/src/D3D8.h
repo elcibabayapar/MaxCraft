@@ -112,6 +112,7 @@ namespace d3d8
         constexpr int GetDepthStencilSurface = 33;
         constexpr int BeginScene = 34;
         constexpr int EndScene = 35;
+        constexpr int Clear = 36;
         constexpr int SetTransform = 37;
         constexpr int GetTransform = 38;
         constexpr int SetViewport = 40;

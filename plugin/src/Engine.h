@@ -90,7 +90,9 @@ namespace mp2
         void* cameraInitLevel;         // void X_CameraImplementation::initLevel(const X_LevelRuntimeRoomContainer*)
         void* cameraDeinitLevel;       // void X_CameraImplementation::deinitLevel()
         void* levelCameraUpdateVisibility;  // void X_LevelRuntimeCamera::updateVisibility()
-        void* allocateRigidBodyRoom;   // static X_RigidBodyRoom* __fastcall(X_HavokGeometry*, const Matrix4x3&)
+        void* allocateRigidBodyRoom;
+        void* setCharacterDead;        // void X_Character::setCharacterDead(bool)
+        void* setDying;                // void X_CharacterProperties::setDying(bool)   // static X_RigidBodyRoom* __fastcall(X_HavokGeometry*, const Matrix4x3&)
     };
 
     extern Api api;

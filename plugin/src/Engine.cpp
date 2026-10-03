@@ -70,6 +70,8 @@ bool mp2::Resolve()
     ok &= Bind(api.cameraInitLevel, objects, "?initLevel@X_CameraImplementation@@UAEXPBVX_LevelRuntimeRoomContainer@@@Z");
     ok &= Bind(api.cameraDeinitLevel, objects, "?deinitLevel@X_CameraImplementation@@UAEXXZ");
     ok &= Bind(api.levelCameraUpdateVisibility, objects, "?updateVisibility@X_LevelRuntimeCamera@@QAEXXZ");
+    ok &= Bind(api.setCharacterDead, objects, "?setCharacterDead@X_Character@@QAEX_N@Z");
+    ok &= Bind(api.setDying, objects, "?setDying@X_CharacterProperties@@QAEX_N@Z");
     ok &= Bind(api.allocateRigidBodyRoom, physics, "?allocateRigidBodyRoom@X_RigidBodyRoom@@SIPAV1@PAVX_HavokGeometry@@ABV?$M_Matrix4x3Template@M@@@Z");
 
     mclog::Info("engine symbols {}", ok ? "resolved" : "INCOMPLETE");

@@ -39,6 +39,12 @@ namespace
     UpdateFn  g_origPost = nullptr;
     PhysicsFn g_origPhysics = nullptr;
     DamageFn  g_origDamage = nullptr;
+    using SetHealthFn = void(__thiscall*)(X_CharacterProperties*, float);
+    using SetDeadFn = void(__thiscall*)(X_Character*, bool);
+    using SetDyingFn = void(__thiscall*)(X_CharacterProperties*, bool);
+    SetHealthFn g_origSetHealth = nullptr;
+    SetDeadFn   g_origSetDead = nullptr;
+    SetDyingFn  g_origSetDying = nullptr;
 
     struct Tracked
     {
@@ -517,6 +523,62 @@ namespace
     }
 }
 
+namespace
+{
+    // While Minecraft has Max, only Minecraft decides when he dies (its health is the real one):
+    // MP2's own ways of killing him outright (level-edge kill zones, falls, scripts) are refused.
+    bool ProtectedProps(X_CharacterProperties* props)
+    {
+        auto& st = State();
+        if (!st.player || !st.minecraftOwnsPlayer || g_allowPlayerDamage)
+            return false;
+        X_CharacterProperties* mine = nullptr;
+        Guarded([&] { mine = api.accessCharacterProperties(st.player); });
+        return props == mine;
+    }
+
+    void LogRefused(const char* what)
+    {
+        static DWORD last = 0;
+        if (GetTickCount() - last > 2000) {
+            last = GetTickCount();
+            mclog::Info("refused MP2 {} for Max (Minecraft decides his health)", what);
+        }
+    }
+
+    void __fastcall SetHealth(X_CharacterProperties* self, void*, float health)
+    {
+        if (ProtectedProps(self)) {
+            float now = health;
+            Guarded([&] { now = api.getHealth(State().player); });
+            if (health < now) {
+                LogRefused("damage");
+                return;
+            }
+        }
+        g_origSetHealth(self, health);
+    }
+
+    void __fastcall SetCharacterDead(X_Character* self, void*, bool dead)
+    {
+        auto& st = State();
+        if (dead && self == st.player && st.minecraftOwnsPlayer && !g_allowPlayerDamage) {
+            LogRefused("death");
+            return;
+        }
+        g_origSetDead(self, dead);
+    }
+
+    void __fastcall SetDying(X_CharacterProperties* self, void*, bool dying)
+    {
+        if (dying && ProtectedProps(self)) {
+            LogRefused("dying");
+            return;
+        }
+        g_origSetDying(self, dying);
+    }
+}
+
 bool characters::Install()
 {
     bool ok = true;
@@ -524,6 +586,9 @@ bool characters::Install()
     ok &= InstallHook(api.updateCharacterPhysics, reinterpret_cast<void*>(&UpdateCharacterPhysics), g_origPhysics, "X_Character::updateCharacterPhysics");
     ok &= InstallHook(api.updatePostPhysics, reinterpret_cast<void*>(&UpdatePostPhysics), g_origPost, "X_Character::updatePostPhysics");
     ok &= InstallHook(api.causeDamageTarget, reinterpret_cast<void*>(&CauseDamage), g_origDamage, "X_Character::causeDamage");
+    ok &= InstallHook(reinterpret_cast<void*>(api.setHealth), reinterpret_cast<void*>(&SetHealth), g_origSetHealth, "X_CharacterProperties::setHealth");
+    ok &= InstallHook(api.setCharacterDead, reinterpret_cast<void*>(&SetCharacterDead), g_origSetDead, "X_Character::setCharacterDead");
+    ok &= InstallHook(api.setDying, reinterpret_cast<void*>(&SetDying), g_origSetDying, "X_CharacterProperties::setDying");
     return ok;
 }
 

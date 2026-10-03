@@ -21,9 +21,6 @@ namespace
         crashlog::Install();
         mclog::Info("MaxCraft 0.1.0 loaded (protocol v{})", proto::kVersion);
 
-        // Minecraft takes about as long to start as MP2 does to reach its menu: start it first.
-        launcher::StartMinecraft();
-
         if (!mp2::Resolve()) {
             mclog::Info("unsupported Max Payne 2 version: MaxCraft stays inactive");
             return 0;

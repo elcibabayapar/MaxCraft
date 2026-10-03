@@ -5,6 +5,7 @@
 #include "D3D8.h"
 #include "Hook.h"
 #include "Input.h"
+#include "Launcher.h"
 #include "Log.h"
 #include "Mapping.h"
 #include "Runtime.h"
@@ -435,6 +436,13 @@ namespace
             ReleaseAll();
             g_stateBlock = 0;
             g_device = device;
+        }
+        // Minecraft starts once MP2's window is up and drawing: its launcher popping up while MP2
+        // is still starting steals focus, and MP2 crashes in its own window code (maxpayne2.exe+0x1b80).
+        static bool minecraftStarted = false;
+        if (!minecraftStarted) {
+            minecraftStarted = true;
+            launcher::StartMinecraft();
         }
         if (!g_windowAttached) {
             DeviceCreationParameters params{};

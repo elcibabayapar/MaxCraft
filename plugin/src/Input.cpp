@@ -45,6 +45,16 @@ namespace
     }();
 
     constexpr std::uint32_t kDikEscape = 0x01;
+    constexpr std::uint32_t kDikR = 0x13;  // MP2 reload
+
+    // MP2 weapon mode: Minecraft keeps walking and looking; MP2 gets the mouse buttons, the wheel,
+    // the number keys and R, so Max's own guns fire, switch and reload.
+    std::atomic<bool> g_weaponMode{ false };
+
+    bool WeaponKey(std::uint32_t dik)
+    {
+        return (dik >= 0x02 && dik <= 0x0A) || dik == kDikR;  // 1-9, R
+    }
     constexpr std::uint32_t kDikE = 0x12;  // MP2's action key
     constexpr std::uint32_t kDikO = 0x18;   // Minecraft's pause / options menu (Esc stays MP2's)
     constexpr std::uint32_t kDikF5 = 0x3F;  // MP2 quicksave
@@ -129,7 +139,7 @@ namespace
     {
         if (State().mcScreenOpen)
             return false;
-        return dik == kDikEscape || dik == kDikF9;
+        return dik == kDikEscape || dik == kDikF9 || (g_weaponMode && WeaponKey(dik));
     }
 
     void HandleKey(std::uint32_t dik, bool down)
@@ -145,6 +155,14 @@ namespace
         auto&       link = Link::Get();
         const auto& cfg = Config::Get();
         if (!st.mcScreenOpen) {
+            if (dik == static_cast<std::uint32_t>(cfg.weaponModeKey)) {
+                if (down) {
+                    g_weaponMode = !g_weaponMode;
+                    input::ReleaseAll();  // Minecraft lets go of whatever it was doing with the mouse
+                    mclog::Info("input: MP2 weapon mode {}", g_weaponMode ? "on (mouse buttons, wheel, 1-9, R -> MP2)" : "off");
+                }
+                return;
+            }
             if (GameKeeps(dik) || dik == static_cast<std::uint32_t>(cfg.quickSaveKey) || dik == static_cast<std::uint32_t>(cfg.bulletTimeKey) ||
                 dik == static_cast<std::uint32_t>(cfg.useKey))
                 return;  // MP2's (passed through, or delivered as F5 / E below)
@@ -165,8 +183,8 @@ namespace
         if (index < 0 || index >= 8 || g_buttonDown[index] == down)
             return;
         g_buttonDown[index] = down;
-        if (!Routed())
-            return;
+        if (!Routed() || (g_weaponMode && !State().mcScreenOpen))
+            return;  // weapon mode: the buttons fire MP2's guns
         static constexpr std::uint16_t kSdl[8] = { 1, 3, 2, 4, 5, 0, 0, 0 };
         if (kSdl[index])
             Link::Get().PushInput(proto::kInMouseButton, kSdl[index], down ? 1 : 0);
@@ -177,7 +195,7 @@ namespace
         if (!Routed())
             return;
         auto& st = State();
-        if (wheel)
+        if (wheel && !(g_weaponMode && !st.mcScreenOpen))
             Link::Get().PushInput(proto::kInScroll, 0, wheel);
         if (!dx && !dy)
             return;
@@ -247,8 +265,12 @@ namespace
                 for (DWORD i = 0; i < buttons; ++i)
                     HandleButton(static_cast<int>(i), (m->rgbButtons[i] & 0x80) != 0);
                 if (Routed()) {
-                    m->lX = m->lY = m->lZ = 0;
-                    std::memset(m->rgbButtons, 0, buttons);
+                    const bool weapons = g_weaponMode && !State().mcScreenOpen;
+                    m->lX = m->lY = 0;
+                    if (!weapons) {
+                        m->lZ = 0;
+                        std::memset(m->rgbButtons, 0, buttons);
+                    }
                     // B held: MP2's bullet time (its right mouse button).
                     if (g_keyDown[cfg.bulletTimeKey & 0xFF] && !State().mcScreenOpen)
                         m->rgbButtons[1] = 0x80;
@@ -300,6 +322,9 @@ namespace
                     HandleMove(0, 0, static_cast<LONG>(item->dwData));
                 else if (item->dwOfs >= kMouseOfsButton0 && item->dwOfs < kMouseOfsButton0 + 8)
                     HandleButton(static_cast<int>(item->dwOfs - kMouseOfsButton0), (item->dwData & 0x80) != 0);
+                // Weapon mode: MP2 keeps its buttons and wheel (not the movement: the look is Minecraft's).
+                if (Routed() && g_weaponMode && !State().mcScreenOpen && (item->dwOfs == kMouseOfsZ || item->dwOfs >= kMouseOfsButton0))
+                    keep = true;
             }
             if (keep) {
                 if (kept != i)
@@ -401,7 +426,7 @@ namespace
     {
         if (State().mcScreenOpen)
             return false;
-        return vk == VK_ESCAPE || vk == VK_F9;
+        return vk == VK_ESCAPE || vk == VK_F9 || (g_weaponMode && ((vk >= '1' && vk <= '9') || vk == 'R'));
     }
 
     UINT QuickSaveVk()

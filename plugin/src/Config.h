@@ -26,6 +26,7 @@ struct Config
     // [Controls]
     int bulletTimeKey = 0x30;  // DIK_B: held -> MP2's bullet time (right mouse button)
     int quickSaveKey = 0x40;   // DIK_F6: -> MP2's quicksave (F5, which is Minecraft's camera key)
+    int weaponModeKey = 0x2F;  // DIK_V: toggles MP2 weapon mode (mouse buttons, wheel, 1-9 and R go to MP2's guns)
     int useKey = 0x22;         // DIK_G: MP2 receives it as E (its action key: doors, switches); E is Minecraft's inventory
 
     // [Debug]

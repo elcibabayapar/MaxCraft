@@ -63,6 +63,7 @@ const Config& Config::Get()
 
         c.bulletTimeKey = ReadInt(ini, L"Controls", L"iBulletTimeKey", c.bulletTimeKey);
         c.quickSaveKey = ReadInt(ini, L"Controls", L"iQuickSaveKey", c.quickSaveKey);
+        c.weaponModeKey = ReadInt(ini, L"Controls", L"iWeaponModeKey", c.weaponModeKey);
         c.useKey = ReadInt(ini, L"Controls", L"iUseKey", c.useKey);
 
         c.diagnostics = ReadInt(ini, L"Debug", L"bDiagnostics", 0) != 0;

@@ -57,6 +57,7 @@ const Config& Config::Get()
         c.forwardRow = ReadInt(ini, L"World", L"iForwardRow", c.forwardRow);
         c.gameHour = ReadFloat(ini, L"World", L"fGameHour", c.gameHour);
         c.bodyBehind = ReadFloat(ini, L"World", L"fBodyBehind", c.bodyBehind);
+        c.moveRenderCamera = ReadInt(ini, L"World", L"bMoveRenderCamera", 1) != 0;
 
         c.enemyDamageScale = ReadFloat(ini, L"Combat", L"fEnemyDamageScale", c.enemyDamageScale);
         c.playerDamageScale = ReadFloat(ini, L"Combat", L"fPlayerDamageScale", c.playerDamageScale);

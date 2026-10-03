@@ -1,6 +1,7 @@
 #include "Camera.h"
 
 #include "Characters.h"
+#include "Config.h"
 #include "Collision.h"
 #include "Hook.h"
 #include "Log.h"
@@ -155,6 +156,9 @@ namespace
                 }
             }
             api.setObjectPosition(camera, ours.row[3]);
+            // Everything MP2 derives from rotation + position (the copy right after the position, the
+            // world-to-camera matrices) is rebuilt by MP2 itself, so no part of it keeps the old camera.
+            api.calculateObjectToWorld(camera);
             if (g_viewconeMode == ViewconeMode::kCameraToWorld)
                 const_cast<Matrix4x3&>(cone) = ours;
         });
@@ -178,14 +182,15 @@ namespace
             const bool   log = GetTickCount() - lastLog > 5000;
             if (log)
                 lastLog = GetTickCount();
-            MoveRenderCamera(self, st.camera, log);
+            if (Config::Get().moveRenderCamera)
+                MoveRenderCamera(self, st.camera, log);
         } else if (g_savedFov > 0.0f) {
             const float saved = g_savedFov;
             Guarded([&] { api.setFOV(self, saved); });
             g_savedFov = -1.0f;
         }
         g_origVisibility(self);
-        if (st.cameraValid && !g_pathActive)
+        if (st.cameraValid && !g_pathActive && Config::Get().moveRenderCamera)
             MoveRenderCamera(self, st.camera, false);  // in case the call above refreshed it from MP2's own camera
     }
 }

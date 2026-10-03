@@ -70,6 +70,7 @@ namespace mp2
         const Matrix4x3&(__thiscall* getViewconeMatrix)(const P_Camera*);
         const Vec3&(__thiscall* getObjectPosition)(const P_Camera*);       // P_BaseObject::getPosition
         void(__thiscall* setObjectPosition)(P_Camera*, const Vec3&);       // P_BaseObject::setPosition
+        void(__thiscall* calculateObjectToWorld)(P_Camera*);              // P_BaseObject::calculateObjectToWorldMatrix
         void(__thiscall* setFOV)(X_LevelRuntimeCamera*, float);
         float(__thiscall* getFOV)(const X_LevelRuntimeCamera*);
 

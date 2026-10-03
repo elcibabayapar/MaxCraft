@@ -54,6 +54,7 @@ bool mp2::Resolve()
     ok &= Bind(api.getViewconeMatrix, L"e2mfc.dll", "?getViewconeMatrix@P_Camera@@QBEABV?$M_Matrix4x3Template@M@@XZ");
     ok &= Bind(api.getObjectPosition, L"e2mfc.dll", "?getPosition@P_BaseObject@@UBEABV?$M_Vector3Template@M@@XZ");
     ok &= Bind(api.setObjectPosition, L"e2mfc.dll", "?setPosition@P_BaseObject@@UAEXABV?$M_Vector3Template@M@@@Z");
+    ok &= Bind(api.calculateObjectToWorld, L"e2mfc.dll", "?calculateObjectToWorldMatrix@P_BaseObject@@IAEXXZ");
     ok &= Bind(api.getFOV, objects, "?getFOV@X_LevelRuntimeCamera@@QBEMXZ");
 
     ok &= Bind(api.getVertexCount, physics, "?getVertexCount@X_HavokGeometry@@QBEHXZ");

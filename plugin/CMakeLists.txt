@@ -38,7 +38,8 @@ add_library(MaxCraft SHARED
     src/Mapping.cpp
     src/Render.cpp)
 
-target_include_directories(MaxCraft PRIVATE src ${SKYCRAFT_DIR}/protocol)
+# MinHook's own target doesn't publish its include directory.
+target_include_directories(MaxCraft PRIVATE src ${SKYCRAFT_DIR}/protocol ${minhook_SOURCE_DIR}/include)
 target_link_libraries(MaxCraft PRIVATE minhook advapi32)
 target_compile_definitions(MaxCraft PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(MaxCraft PRIVATE /W4 /utf-8 /permissive- /EHsc /wd4324)

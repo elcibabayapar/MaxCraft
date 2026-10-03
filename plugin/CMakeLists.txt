@@ -9,14 +9,18 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-# MinHook declares an old cmake_minimum_required that CMake 4 rejects.
-set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
-
+# MinHook v1.3.3 ships no CMake project: fetch the sources and build them as a static library.
 include(FetchContent)
 FetchContent_Declare(minhook
     GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
     GIT_TAG        v1.3.3)
-FetchContent_MakeAvailable(minhook)
+FetchContent_Populate(minhook)
+add_library(minhook STATIC
+    ${minhook_SOURCE_DIR}/src/buffer.c
+    ${minhook_SOURCE_DIR}/src/hook.c
+    ${minhook_SOURCE_DIR}/src/trampoline.c
+    ${minhook_SOURCE_DIR}/src/hde/hde32.c)
+target_include_directories(minhook PUBLIC ${minhook_SOURCE_DIR}/include)
 
 # SkyCraft's protocol header, pinned by the extern/SkyCraft submodule: both halves must match.
 set(SKYCRAFT_DIR ${CMAKE_SOURCE_DIR}/../extern/SkyCraft)
@@ -38,8 +42,7 @@ add_library(MaxCraft SHARED
     src/Mapping.cpp
     src/Render.cpp)
 
-# MinHook's own target doesn't publish its include directory.
-target_include_directories(MaxCraft PRIVATE src ${SKYCRAFT_DIR}/protocol ${minhook_SOURCE_DIR}/include)
+target_include_directories(MaxCraft PRIVATE src ${SKYCRAFT_DIR}/protocol)
 target_link_libraries(MaxCraft PRIVATE minhook advapi32)
 target_compile_definitions(MaxCraft PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
 target_compile_options(MaxCraft PRIVATE /W4 /utf-8 /permissive- /EHsc /wd4324)

@@ -131,14 +131,45 @@ namespace
         return frac;
     }
 
+    float HealthOf(X_Character* c)
+    {
+        float h = -1.0f;
+        Guarded([&] { h = api.getHealth(c); });
+        return h;
+    }
+
+    // A Minecraft hit on an MP2 character. MP2's own damage paths come first (hit reactions, death
+    // animations, AI alerting); each is checked for whether the health actually went down, since
+    // causeDamage without a shooting target was seen to do nothing at all.
     void Damage(X_Character* target, float amount)
     {
-        if (!Guarded([&] { g_origDamage(target, amount, 0.0f, 0, State().player, nullptr); })) {
-            // The engine's damage path rejected our arguments: take the health off directly.
+        static int logged = 0;
+        const float before = HealthOf(target);
+        const char* how = "causeDamage";
+        Guarded([&] { g_origDamage(target, amount, 1.0f, 0, State().player, nullptr); });
+        if (HealthOf(target) >= before - 1e-4f) {
+            how = "explosionDamage";
             Guarded([&] {
-                X_CharacterProperties* props = api.accessCharacterProperties(target);
-                api.setHealth(props, (std::max)(0.0f, api.getHealth(target) - amount));
+                Vec3 at{};
+                api.getHeadPosition(target, at);
+                const void* source = State().player ? api.getOID(State().player) : nullptr;
+                if (source)
+                    api.explosionDamage(target, source, amount, at, 0, false, false);
             });
+        }
+        if (HealthOf(target) >= before - 1e-4f) {
+            how = "health";
+            const float left = (std::max)(0.0f, before - amount);
+            Guarded([&] { api.setHealth(api.accessCharacterProperties(target), left); });
+            if (left <= 0.0f) {
+                how = "health + knocked over";
+                Guarded([&] { api.knockOver(target); });
+                Guarded([&] { g_origSetDead(target, true); });
+            }
+        }
+        if (logged < 12) {
+            ++logged;
+            mclog::Info("damage: {:.1f} to {:p} via {}: health {:.1f} -> {:.1f}", amount, static_cast<void*>(target), how, before, HealthOf(target));
         }
     }
 

@@ -39,6 +39,10 @@ bool mp2::Resolve()
     ok &= Bind(api.getSkinName, objects, "?getSkinName@X_Character@@QBEABV?$basic_string@DU?$char_traits@D@std@@V?$R_Allocator@D@@@std@@XZ");
     ok &= Bind(api.causeDamage, objects, "?causeDamage@X_Character@@QAEXMMW4DeathAnim@1@PAV1@PBVX_SharedDBShootingTarget@@@Z");
     api.causeDamageTarget = reinterpret_cast<void*>(api.causeDamage);
+    ok &= Bind(api.getOID, objects, "?getOID@X_Character@@UBEPBVX_ObjectID@@XZ");
+    ok &= Bind(api.explosionDamage, objects, "?explosionDamage@X_Character@@QAEXABVX_ObjectID@@MABV?$M_Vector3Template@M@@H_N2@Z");
+    ok &= Bind(api.knockOver, objects, "?knockOver@X_Character@@QAEXXZ");
+    ok &= Bind(api.getHeadPosition, objects, "?getHeadPosition@X_Character@@QBEXAAV?$M_Vector3Template@M@@@Z");
 
     ok &= Bind(api.getTransform, objects, "?getTransform@X_CharacterProperties@@QBEABV?$M_Matrix4x3Template@M@@XZ");
     ok &= Bind(api.setTransform, objects, "?setTransform@X_CharacterProperties@@QAEXABV?$M_Matrix4x3Template@M@@@Z");

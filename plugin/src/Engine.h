@@ -51,6 +51,10 @@ namespace mp2
         const X_PhysicalCharacter*(__thiscall* getPhysicalCharacter)(const X_Character*);
         const void*(__thiscall* getSkinName)(const X_Character*);  // const std::string& (VC7.1 layout)
         void(__thiscall* causeDamage)(X_Character*, float, float, int, X_Character*, const void*);
+        const void*(__thiscall* getOID)(const X_Character*);  // const X_ObjectID*
+        void(__thiscall* explosionDamage)(X_Character*, const void* sourceOid, float, const Vec3&, int, bool, bool);
+        void(__thiscall* knockOver)(X_Character*);
+        void(__thiscall* getHeadPosition)(const X_Character*, Vec3&);
 
         // X_CharacterProperties
         const Matrix4x3&(__thiscall* getTransform)(const X_CharacterProperties*);

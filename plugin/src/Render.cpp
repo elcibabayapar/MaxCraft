@@ -345,10 +345,14 @@ namespace
     {
         if (!g_atlas || g_sections.empty() || !Mapping::Get().Calibrated())
             return;
-        Matrix view = g_view, proj = g_proj;
-        const bool gameView = g_haveView && g_haveProj;
-        if (!gameView)
-            ComputeCamera(st, view, proj, w, h);
+        // Our blocks live in MP2 world space and our eye is st.camera, so the view is built from it
+        // directly. MP2's own view matrices are rotation-only (its scene rides on identity views with
+        // the camera baked into the world matrices — "world matrices moved" in the log), so they
+        // carry no eye translation and would displace every block off screen.
+        Matrix view{}, proj{};
+        ComputeCamera(st, view, proj, w, h);
+        if (g_haveProj)
+            proj = g_proj;  // the projection the picture really uses
 
         // Where does the first block vertex actually land on the screen? Decides between "wrong
         // matrices" (off screen) and "pixels discarded" (on screen but invisible).
@@ -372,10 +376,10 @@ namespace
                 XformPoint(p, worldViewProj, clip);
                 const float cw = clip[3] != 0.0f ? clip[3] : 1e-6f;
                 mclog::Info("blocks probe: vertex world ({:.1f}, {:.1f}, {:.1f}) -> ndc ({:.2f}, {:.2f}, {:.3f}) w {:.1f} -> screen ({:.0f}, {:.0f}) of {}x{}; "
-                            "{} view, view last row ({:.1f} {:.1f} {:.1f}), proj {:.2f}/{:.2f}, z {}{}",
+                            "eye view last row ({:.1f} {:.1f} {:.1f}), proj {:.2f}/{:.2f}{}, z {}{}",
                             worldPos[0], worldPos[1], worldPos[2], clip[0] / cw, clip[1] / cw, clip[2] / cw, clip[3], (clip[0] / cw * 0.5f + 0.5f) * w,
-                            (0.5f - clip[1] / cw * 0.5f) * h, w, h, gameView ? "game" : "fallback", view.m[3][0], view.m[3][1], view.m[3][2], proj.m[0][0],
-                            proj.m[1][1], g_sceneZEnable, Config::Get().blocksNoDepth ? ", depth off" : "");
+                            (0.5f - clip[1] / cw * 0.5f) * h, w, h, view.m[3][0], view.m[3][1], view.m[3][2], proj.m[0][0], proj.m[1][1],
+                            g_haveProj ? " (game)" : " (own)", g_sceneZEnable, Config::Get().blocksNoDepth ? ", depth off" : "");
                 // What does the atlas hold at that vertex's UV? (A8R8G8B8, read back as AARRGGBB.)
                 const UINT tx = (std::min)(static_cast<UINT>(first->probeU * g_atlasW), g_atlasW - 1);
                 const UINT ty = (std::min)(static_cast<UINT>(first->probeV * g_atlasH), g_atlasH - 1);

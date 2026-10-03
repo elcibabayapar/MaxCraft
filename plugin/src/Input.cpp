@@ -45,6 +45,7 @@ namespace
     }();
 
     constexpr std::uint32_t kDikEscape = 0x01;
+    constexpr std::uint32_t kDikE = 0x12;  // MP2's action key
     constexpr std::uint32_t kDikO = 0x18;   // Minecraft's pause / options menu (Esc stays MP2's)
     constexpr std::uint32_t kDikF5 = 0x3F;  // MP2 quicksave
     constexpr std::uint32_t kDikF9 = 0x43;  // MP2 quickload
@@ -128,7 +129,7 @@ namespace
     {
         if (State().mcScreenOpen)
             return false;
-        return dik == kDikEscape || dik == kDikF9 || dik == static_cast<std::uint32_t>(Config::Get().useKey);
+        return dik == kDikEscape || dik == kDikF9;
     }
 
     void HandleKey(std::uint32_t dik, bool down)
@@ -144,14 +145,9 @@ namespace
         auto&       link = Link::Get();
         const auto& cfg = Config::Get();
         if (!st.mcScreenOpen) {
-            if (GameKeeps(dik) || dik == static_cast<std::uint32_t>(cfg.quickSaveKey) || dik == static_cast<std::uint32_t>(cfg.bulletTimeKey))
-                return;  // MP2's (injected below or passed straight through)
-            if (dik == static_cast<std::uint32_t>(cfg.inventoryKey)) {
-                // Minecraft's inventory, on a key of its own: E itself stays MP2's action key.
-                if (const auto sdl = kDikToSdl[0x12])
-                    link.PushInput(proto::kInKey, sdl, down ? 1 : 0);
-                return;
-            }
+            if (GameKeeps(dik) || dik == static_cast<std::uint32_t>(cfg.quickSaveKey) || dik == static_cast<std::uint32_t>(cfg.bulletTimeKey) ||
+                dik == static_cast<std::uint32_t>(cfg.useKey))
+                return;  // MP2's (passed through, or delivered as F5 / E below)
             if (dik == kDikO) {
                 if (down) {
                     input::ReleaseAll();
@@ -226,11 +222,16 @@ namespace
                     HandleKey(i, (keys[i] & 0x80) != 0);
                 if (Routed()) {
                     const bool quickSave = keys[cfg.quickSaveKey & 0xFF] & 0x80;
+                    const bool use = keys[cfg.useKey & 0xFF] & 0x80;
                     for (std::uint32_t i = 0; i < (std::min)(bytes, 256ul); ++i)
                         if (!GameKeeps(i))
                             keys[i] = 0;
-                    if (quickSave && !State().mcScreenOpen)
-                        keys[kDikF5] = 0x80;
+                    if (!State().mcScreenOpen) {
+                        if (quickSave)
+                            keys[kDikF5] = 0x80;
+                        if (use)
+                            keys[kDikE] = 0x80;
+                    }
                 }
                 break;
             }
@@ -282,6 +283,9 @@ namespace
                     if ((item->dwOfs & 0xFF) == static_cast<DWORD>(cfg.quickSaveKey & 0xFF) && !State().mcScreenOpen) {
                         item->dwOfs = kDikF5;
                         keep = true;
+                    } else if ((item->dwOfs & 0xFF) == static_cast<DWORD>(cfg.useKey & 0xFF) && !State().mcScreenOpen) {
+                        item->dwOfs = kDikE;
+                        keep = true;
                     }
                 }
             } else {
@@ -309,6 +313,7 @@ namespace
 
     bool GameKeepsVk(UINT vk);
     UINT QuickSaveVk();
+    UINT GameVkFor(UINT vk);
 
     LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
@@ -328,8 +333,8 @@ namespace
         }
         if ((message == WM_KEYDOWN || message == WM_KEYUP || message == WM_SYSKEYDOWN || message == WM_SYSKEYUP) && Routed()) {
             const UINT vk = static_cast<UINT>(wParam);
-            if (vk == QuickSaveVk() && !State().mcScreenOpen)
-                return CallWindowProcW(g_origWndProc, window, message, VK_F5, lParam);
+            if (const UINT game = GameVkFor(vk))
+                return CallWindowProcW(g_origWndProc, window, message, game, lParam);
             if (!GameKeepsVk(vk))
                 return 0;
         }
@@ -396,7 +401,7 @@ namespace
     {
         if (State().mcScreenOpen)
             return false;
-        return vk == VK_ESCAPE || vk == VK_F9 || vk == UseKeyVk();
+        return vk == VK_ESCAPE || vk == VK_F9;
     }
 
     UINT QuickSaveVk()
@@ -423,6 +428,33 @@ namespace
         return vk && (g_origGetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
     }
 
+    bool UseHeld()
+    {
+        const UINT vk = UseKeyVk();
+        return vk && (g_origGetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
+    }
+
+    // While Minecraft has the keyboard, the key MP2 should get for physical key `vk`: our quicksave
+    // key arrives as F5, our action key as E; 0 for keys MP2 doesn't get at all.
+    UINT GameVkFor(UINT vk)
+    {
+        if (State().mcScreenOpen)
+            return 0;
+        if (vk == QuickSaveVk())
+            return VK_F5;
+        if (vk == UseKeyVk())
+            return 'E';
+        return 0;
+    }
+
+    // Whether MP2 should read virtual key `vk` as held because its stand-in key is.
+    bool InjectedDown(int vk)
+    {
+        if (State().mcScreenOpen)
+            return false;
+        return (vk == VK_F5 && QuickSaveHeld()) || (vk == 'E' && UseHeld());
+    }
+
     // What MP2 may see of key `vk` while Minecraft has the keyboard.
     bool Hidden(int vk)
     {
@@ -432,14 +464,14 @@ namespace
     SHORT WINAPI GetAsyncKeyStateHook(int vk)
     {
         if (Hidden(vk))
-            return (vk == VK_F5 && !State().mcScreenOpen && QuickSaveHeld()) ? SHORT(0x8000) : SHORT(0);
+            return InjectedDown(vk) ? SHORT(0x8000) : SHORT(0);
         return g_origGetAsyncKeyState(vk);
     }
 
     SHORT WINAPI GetKeyStateHook(int vk)
     {
         if (Hidden(vk))
-            return (vk == VK_F5 && !State().mcScreenOpen && QuickSaveHeld()) ? SHORT(0xFF80) : SHORT(0);
+            return InjectedDown(vk) ? SHORT(0xFF80) : SHORT(0);
         return g_origGetKeyState(vk);
     }
 
@@ -450,8 +482,10 @@ namespace
             for (int vk = 0; vk < 256; ++vk)
                 if (!GameKeepsVk(static_cast<UINT>(vk)))
                     keys[vk] = 0;
-            if (!State().mcScreenOpen && QuickSaveHeld())
+            if (InjectedDown(VK_F5))
                 keys[VK_F5] = 0x80;
+            if (InjectedDown('E'))
+                keys['E'] = 0x80;
         }
         return ok;
     }
@@ -462,8 +496,8 @@ namespace
     {
         if (code >= 0 && Routed() && g_gameKeyboardHook) {
             const UINT vk = static_cast<UINT>(wParam);
-            if (vk == QuickSaveVk() && !State().mcScreenOpen)
-                return g_gameKeyboardHook(code, VK_F5, lParam);
+            if (const UINT game = GameVkFor(vk))
+                return g_gameKeyboardHook(code, game, lParam);
             if (!GameKeepsVk(vk))
                 return CallNextHookEx(nullptr, code, wParam, lParam);
         }
@@ -486,9 +520,9 @@ namespace
         if (message && Routed() &&
             (message->message == WM_KEYDOWN || message->message == WM_KEYUP || message->message == WM_SYSKEYDOWN || message->message == WM_SYSKEYUP)) {
             const UINT vk = static_cast<UINT>(message->wParam);
-            if (vk == QuickSaveVk() && !State().mcScreenOpen) {
+            if (const UINT game = GameVkFor(vk)) {
                 MSG copy = *message;
-                copy.wParam = VK_F5;
+                copy.wParam = game;
                 return g_origTranslateAcceleratorA(window, table, &copy);
             }
             if (!GameKeepsVk(vk))

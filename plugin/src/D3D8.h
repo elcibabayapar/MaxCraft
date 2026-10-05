@@ -3,6 +3,13 @@
 // The slice of Direct3D 8 MaxCraft uses. The Windows SDK no longer ships d3d8.h, so the types,
 // constants and vtable slots are declared here (values from the DirectX 8 SDK headers).
 // COM methods are called by vtable index: VCall<Index, Ret>(object, args...).
+//
+// Three of the slots below are reverse-engineered and are flagged where they are declared:
+// surf::GetDesc (8), tex::LockRect/UnlockRect (16/17), and SurfaceDesc's field order. None of them
+// matches the published IDirect3DSurface8 / IDirect3DTexture8 vtables, they cannot all be brought
+// into agreement by one base offset, and the two that render correctly in every captured session
+// are therefore left as they are. Render.cpp checks them at runtime once per device and logs which
+// candidate answered - re-verify all three on any d3d8.dll or driver change before editing.
 
 #include <Windows.h>
 
@@ -55,6 +62,15 @@ namespace d3d8
         UINT Width, Height, RefreshRate, Format;
     };
 
+    // REVERSE-ENGINEERED, and neither the SDK's layout nor a subset aligned to it: the SDK declares
+    // Format, Type, Usage, MultiSampleType, MultiSampleQuality, SwapEffect, Pool, Size, Width,
+    // Height, so with this field order Width and Height are read from where the SDK keeps SwapEffect
+    // and Pool. It is kept because it is what every captured session read with, and the evidence it
+    // produced looks right (the depth line reads 1920x1080, format 75 = D3DFMT_D24S8, no MSAA), but
+    // a "1920x1080" here is two words of a structure nobody has checked against the real one.
+    // Render.cpp's once-per-device surface check reads the words raw, both through this file's slot
+    // and through the SDK's, so the layout can be settled in one session; do not read width, height,
+    // format or multisample out of this struct without that log line in front of you.
     struct SurfaceDesc
     {
         UINT  Format;
@@ -133,16 +149,31 @@ namespace d3d8
     }
 
     // IDirect3DSurface8
+    //
+    // REVERSE-ENGINEERED, and reported inconsistent with the published IDirect3DSurface8 vtable: the
+    // SDK's GetLevelDesc is not slot 8, and no single base offset makes both 8 and 10 the same call
+    // under two different headers. Slot 8 is what has always been used and it answered with a sane
+    // description in every captured session (the depth log reads 1920x1080 / D3DFMT_D24S8 / no MSAA),
+    // so it stays. GetDescAlt is the slot reported to be the SDK's; Render.cpp reads it once per
+    // device and logs which one described the surface. Change one only on the strength of that log.
     namespace surf
     {
         constexpr int GetDesc = 8;
+        constexpr int GetDescAlt = 10;
     }
 
     // IDirect3DTexture8
+    //
+    // REVERSE-ENGINEERED, and reported inconsistent with surf's: if GetDesc is really slot 8 then the
+    // lock pair that goes with it is not 16/17, and the two accounts put the pair more than two slots
+    // apart. Both sets work in the captured sessions (no "texture: lock ... failed" lines, and the
+    // atlas probe reads a plausible texel), so both stay and Render.cpp tries both once per device.
     namespace tex
     {
         constexpr int LockRect = 16;
         constexpr int UnlockRect = 17;
+        constexpr int LockRectAlt = 13;
+        constexpr int UnlockRectAlt = 14;
     }
 
     // IDirect3DVertexBuffer8

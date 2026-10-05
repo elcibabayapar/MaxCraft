@@ -32,19 +32,58 @@ namespace
     BeginSceneFn   g_origBeginScene = nullptr;
     using ClearFn = HRESULT(__stdcall*)(void*, DWORD, const void*, DWORD, DWORD, float, DWORD);
     ClearFn        g_origClear = nullptr;
-    // This frame: how much of MP2's 3D scene went by (views replaced / world matrices moved) and
-    // whether the blocks are already in. They go in at the last moment MP2's depth buffer still
-    // holds the world: right before MP2 clears it mid-frame (for its weapon / HUD), else at the end
-    // of its 3D scene, else (no occlusion then) at Present.
+    // ---- Where Minecraft's blocks go into MP2's frame -----------------------------------------
+    // MP2 draws a frame as a run of BeginScene/EndScene pairs. Its 3D scene - the level - goes into
+    // a depth buffer; then MP2 wipes that depth buffer and draws its weapon and HUD, which are
+    // camera-space or 2D and want no depth from the world. Our block pass is a WORLD render: it
+    // runs from the world camera (DrawWorld) and it goes in at one of three moments, which differ
+    // in what MP2's depth buffer still holds when it runs.
+    //
+    //   before the weapon clear   Clear(), immediately before MP2 clears the depth buffer for its
+    //                             weapon / HUD pass. The whole level is in that buffer and none of
+    //                             the weapon is, so every wall occludes correctly and nothing can
+    //                             hide behind the pistol. This is the last moment the world's depth
+    //                             survives, which is why automatic mode prefers it - but it only
+    //                             happens in frames where MP2 runs a multi-scene frame, and weapon
+    //                             mode, third person and cut-scenes do not all do that.
+    //   the world scene's end     EndScene(), in the 3D scene itself, guarded by
+    //                             g_depthClearedThisScene: if MP2 already cleared its depth buffer
+    //                             in this scene the depth belongs to the weapon, not to the level,
+    //                             so that frame falls through to Present instead of testing blocks
+    //                             against a depth buffer that is not the world's. Same occlusion
+    //                             as above, and it does not depend on the weapon pass at all.
+    //   Present                   after MP2 is done, in a BeginScene of our own. MP2's depth buffer
+    //                             here belongs to its weapon / HUD pass, because it cleared it
+    //                             before the weapon, so there is NO world depth to test against:
+    //                             the walls MP2 painted are pixels with no depth left and the
+    //                             blocks go over them, and the only pixels that can still reject a
+    //                             block are the weapon's own silhouette. Visible always, occluded
+    //                             never. Last resort in every mode, and "the blocks are in front of
+    //                             the walls" is the one symptom that means the block pass has
+    //                             stopped being a world render.
+    //
+    // BlocksDrawMode() reads the settings: drawAtEndScene picks between the first two, and
+    // blocksNoDepth ("over everything", which needs no depth test to mean that) pins the pass to
+    // Present. Every mode ends at Present, so blocks are never simply missing.
     UINT           g_frameSceneDraws = 0;
     bool           g_blocksDrawnThisFrame = false;
+    // MP2 threw away a depth buffer that already held the world inside the scene that is running
+    // now (its weapon / HUD pass). After that the scene's EndScene is past the world's depth.
+    bool           g_depthClearedThisScene = false;
+    // MP2's draws since the last depth clear, which is what tells a scene-opening clear (nothing
+    // drawn since the last one: the scene is filling its depth buffer) from a clear that discards a
+    // world that was already drawn.
+    UINT           g_drawsSinceClear = 0;
     UINT           g_drawnAtClear = 0, g_drawnAtEndScene = 0, g_drawnAtPresent = 0;
     EndSceneFn     g_origEndScene = nullptr;
 
-    // MP2's own camera matrices, as it last set them: our blocks use exactly the same ones, so they
-    // line up with its picture and depth buffer.
-    Matrix g_view{}, g_proj{};
-    bool   g_haveView = false, g_haveProj = false;
+    // MP2's world projection, as it last set it. The blocks are drawn into the same picture, so
+    // they take the projection MP2's geometry was drawn with (SceneProjection picks it out of the
+    // frame) rather than one of their own, which would disagree about the aspect ratio or the far
+    // plane. MP2's view matrices are deliberately not kept: they are rotation-only (see
+    // SetTransform), so they carry no eye translation and are no use for placing blocks on screen.
+    Matrix g_proj{};
+    bool   g_haveProj = false;
     UINT   g_viewSets = 0, g_viewReplaced = 0, g_worldCorrected = 0;  // per 5 s, for the log
     DWORD  g_sceneZEnable = 1;  // D3DRS_ZENABLE as MP2's 3D scene set it (1 z-buffer, 2 w-buffer)
     UINT   g_trianglesDrawn = 0;
@@ -83,14 +122,31 @@ namespace
                 best = &g_frameProj[i];
         return best ? &best->m : nullptr;
     }
+    // One of MP2's own draws in a perspective scene, which is what "a world draw" means to the block
+    // pass: it counts towards the frame's total (ReadyForBlocks wants 8 of them as evidence that a
+    // world went by) and towards whether the next depth clear is discarding that world.
+    void NoteSceneDraw()
+    {
+        ++g_frameSceneDraws;
+        ++g_drawsSinceClear;
+        NoteSceneProjection();
+    }
     bool   g_haveProjInverse = false, g_haveCorrection = false;
     UINT   g_constantsMoved = 0;
     // Whether this scene (BeginScene..EndScene) saw a perspective projection: MP2's 3D world does,
     // its HUD scenes do not. Blocks drawn at EndScene only after a 3D scene.
     bool g_sceneHadPerspective = false;
-    // Per 5 s, for the log: our own draw calls that failed, and the last failure code.
+    // Per 5 s, for the log: our own draw calls that failed. The first failure is also named on its own
+    // line with its HRESULT, which is the only one a user can act on.
     UINT g_drawFailures = 0;
-    HRESULT g_lastDrawFailure = 0;
+    // Per 5 s, for the log: render messages this side refused (Minecraft's header disagreed with
+    // Minecraft's payload, or a count asked for an impossible allocation) and frames where the
+    // render ring held more than the per-frame budget could take. Both are per 5 s so a user can
+    // tell "the blocks are a frame late" (the ring) from "a section never arrived" (refused).
+    UINT g_rejectedMessages = 0, g_renderBacklog = 0;
+    // Per 5 s, for the log: scene moments that found no camera to draw the blocks from (see
+    // ReadyForBlocks). Non-zero while MP2 is on a cut-scene whose camera Camera.cpp is not capturing.
+    UINT g_noCamera = 0;
 
     struct Vertex
     {
@@ -147,9 +203,39 @@ namespace
     DWORD                                     g_stateBlock = 0;
     bool                                      g_windowAttached = false;
 
+    // Section coordinates are 16-block cubes, so a section key that holds +/-1048576 cubes is a
+    // +/-16-million-block world: every world Minecraft will ever load fits with room to spare, and
+    // 21 bits per axis is all three of them can have out of 64 (Collision.cpp packs its regions the
+    // same way, with the same bias, so the two agree on what "outside the range" means).
+    constexpr std::int64_t kSectionBias = 1ll << 20;
+
+    // Once per process, say that a coordinate could not be packed instead of letting it alias onto
+    // another section's key: this line is the only way the user learns their world position went
+    // outside what the keys can hold. The key is still returned (pinned to the nearest value it can
+    // hold) so the map stays a map: a rejected section is dropped, not misfiled onto a real one.
+    void NoteSectionRange(double value)
+    {
+        static std::atomic<bool> logged{ false };
+        if (!logged.exchange(true, std::memory_order_relaxed))
+            mclog::Info("blocks: section coordinate {:.0f} is outside the +/-{} these keys can hold; blocks there are misplaced",
+                        value, double(kSectionBias));
+    }
+
+    // The old packing masked each axis to 21 bits, so -1 and 2097151 were the same section and one
+    // of them silently overwrote the other's geometry. Biasing into [0, 2^21) puts the sign in the
+    // middle of the key and costs nothing: one add, one compare, one shift and three ors.
     std::uint64_t SectionKey(int x, int y, int z)
     {
-        return (std::uint64_t(std::uint32_t(x) & 0x1FFFFF) << 42) | (std::uint64_t(std::uint32_t(y) & 0x1FFFFF) << 21) | (std::uint32_t(z) & 0x1FFFFF);
+        const int axis[3] = { x, y, z };
+        std::uint64_t key = 0;
+        for (int i = 0; i < 3; ++i) {
+            const std::int64_t raw = std::int64_t(axis[i]);
+            if (raw < -kSectionBias || raw >= kSectionBias)
+                NoteSectionRange(double(raw));
+            const std::int64_t packed = std::clamp<std::int64_t>(raw + kSectionBias, 0, 2ll * kSectionBias - 1);
+            key = (key << 21) | static_cast<std::uint64_t>(packed);
+        }
+        return key;
     }
 
     void ReleaseSection(Section& s)
@@ -241,16 +327,39 @@ namespace
         return 0xFF000000u | (channel(0) << 16) | (channel(8) << 8) | channel(16);
     }
 
+    // A render message that does not match its own header. Nothing is drawn, freed or resized on
+    // its account; it is counted and the first few are named in the log, because "the blocks did not
+    // update" is otherwise indistinguishable from "Minecraft could not keep up" (g_renderBacklog).
+    void NoteRejectedMessage(std::uint32_t type, std::uint32_t bytes, const char* why)
+    {
+        if (g_rejectedMessages < 4)
+            mclog::Info("render: message type {} ({} bytes) refused: {}", type, bytes, why);
+        ++g_rejectedMessages;
+    }
+
+    // A message's own counts are Minecraft's, and the byte budget is what holds them: `bytes` is a
+    // u32, so width * height * 4 can be made to wrap even in 64 bits (2^32 * 2^32 * 4 overflows a
+    // u64) and a section's or a scene's vertex count can be large enough that building it asks for
+    // gigabytes and throws out of a detour. Both are bounded here instead of being multiplied blind.
+    constexpr UINT               kMaxAtlasDim = 4096;       // SkyCraft's own atlas was 2048x2576
+    constexpr std::uint32_t      kMaxSectionVertices = 1u << 20;  // 16^3 cubes, 6 faces, 4 verts = 393216 unculled
+    constexpr std::uint32_t      kMaxSceneVertices = 1u << 20;    // tens of thousands of entity vertices is real
+    constexpr std::uint32_t      kMaxSceneBatches = 1u << 16;
+    // w * h * 4 for two dimensions already known to be sane, in 64 bits.
+    std::uint64_t PixelsOf(std::uint32_t w, std::uint32_t h) { return std::uint64_t(w) * h * 4; }
+
     void OnRenderMessage(void* device, std::uint32_t type, const std::uint8_t* data, std::uint32_t bytes)
     {
         switch (type) {
         case proto::kRenAtlas:
             {
                 if (bytes < sizeof(proto::RenAtlas))
-                    return;
+                    return NoteRejectedMessage(type, bytes, "shorter than its header");
                 const auto* hdr = reinterpret_cast<const proto::RenAtlas*>(data);
-                if (bytes < sizeof(*hdr) + std::uint64_t(hdr->width) * hdr->height * 4)
-                    return;
+                if (!hdr->width || !hdr->height || hdr->width > kMaxAtlasDim || hdr->height > kMaxAtlasDim)
+                    return NoteRejectedMessage(type, bytes, "atlas size is zero or past 4096");
+                if (bytes < sizeof(*hdr) + PixelsOf(hdr->width, hdr->height))
+                    return NoteRejectedMessage(type, bytes, "its pixels are not all in the message");
                 if (!g_atlas || g_atlasW != hdr->width || g_atlasH != hdr->height) {
                     Release(g_atlas);
                     g_atlas = CreateTexture(device, hdr->width, hdr->height);
@@ -264,25 +373,39 @@ namespace
             }
         case proto::kRenAtlasRegion:
             {
-                if (!g_atlas || bytes < sizeof(proto::RenAtlasRegion))
-                    return;
+                if (bytes < sizeof(proto::RenAtlasRegion))
+                    return NoteRejectedMessage(type, bytes, "shorter than its header");
+                if (!g_atlas)
+                    return;  // no atlas yet: SkyCraft only sends regions once it has sent one
                 const auto* r = reinterpret_cast<const proto::RenAtlasRegion*>(data);
-                if (r->x + r->width > g_atlasW || r->y + r->height > g_atlasH || bytes < sizeof(*r) + std::uint64_t(r->width) * r->height * 4)
-                    return;
+                // The bounds are compared in 64 bits: r->x + r->width in 32-bit arithmetic wraps,
+                // and a wrapped sum passes a 32-bit compare while the pixels are nowhere near it.
+                if (!r->width || !r->height || r->width > g_atlasW || r->height > g_atlasH || std::uint64_t(r->x) + r->width > g_atlasW ||
+                    std::uint64_t(r->y) + r->height > g_atlasH)
+                    return NoteRejectedMessage(type, bytes, "region is empty or outside the atlas");
+                if (bytes < sizeof(*r) + PixelsOf(r->width, r->height))
+                    return NoteRejectedMessage(type, bytes, "its pixels are not all in the message");
                 UploadRgba(g_atlas, r->x, r->y, r->width, r->height, data + sizeof(*r), r->width * 4);
                 break;
             }
         case proto::kRenSection:
             {
                 if (bytes < sizeof(proto::RenSection))
-                    return;
+                    return NoteRejectedMessage(type, bytes, "shorter than its header");
                 const auto* s = reinterpret_cast<const proto::RenSection*>(data);
-                const auto  key = SectionKey(s->sx, s->sy, s->sz);
+                // Checked before anything is released: 0 vertices is the protocol's "this section is
+                // gone", but a section whose payload did not arrive in full is a message we could not
+                // read, and taking its geometry down with it would leave a hole in the world.
+                if (s->vertexCount && bytes < sizeof(*s) + std::uint64_t(s->vertexCount) * sizeof(proto::RenVertex))
+                    return NoteRejectedMessage(type, bytes, "it claims more vertices than it carries");
+                if (s->vertexCount > kMaxSectionVertices)
+                    return NoteRejectedMessage(type, bytes, "more vertices than a 16-block section can hold");
+                const auto key = SectionKey(s->sx, s->sy, s->sz);
                 if (auto it = g_sections.find(key); it != g_sections.end()) {
                     ReleaseSection(it->second);
                     g_sections.erase(it);
                 }
-                if (s->vertexCount == 0 || bytes < sizeof(*s) + std::uint64_t(s->vertexCount) * sizeof(proto::RenVertex))
+                if (s->vertexCount == 0)
                     return;
                 const auto*                verts = reinterpret_cast<const proto::RenVertex*>(data + sizeof(*s));
                 static std::vector<Vertex> solid, translucent;
@@ -316,6 +439,7 @@ namespace
                 break;
             }
         case proto::kRenClearAll:
+            // Nothing is read out of the message, so there is nothing to bounds check.
             for (auto& [key, s] : g_sections)
                 ReleaseSection(s);
             g_sections.clear();
@@ -325,11 +449,12 @@ namespace
         case proto::kRenTexture:
             {
                 if (bytes < sizeof(proto::RenTexture))
-                    return;
+                    return NoteRejectedMessage(type, bytes, "shorter than its header");
                 const auto* hdr = reinterpret_cast<const proto::RenTexture*>(data);
-                if (!hdr->width || !hdr->height || hdr->width > 4096 || hdr->height > 4096 ||
-                    bytes < sizeof(*hdr) + std::uint64_t(hdr->width) * hdr->height * 4)
-                    return;
+                if (!hdr->width || !hdr->height || hdr->width > kMaxAtlasDim || hdr->height > kMaxAtlasDim)
+                    return NoteRejectedMessage(type, bytes, "skin size is zero or past 4096");
+                if (bytes < sizeof(*hdr) + PixelsOf(hdr->width, hdr->height))
+                    return NoteRejectedMessage(type, bytes, "its pixels are not all in the message");
                 auto& t = g_entityTextures[hdr->id];
                 if (!t.texture || t.width != hdr->width || t.height != hdr->height) {
                     Release(t.texture);
@@ -343,24 +468,36 @@ namespace
             }
         case proto::kRenScene:
             {
-                g_scene.batches.clear();
-                g_scene.vertices.clear();
                 if (bytes < sizeof(proto::RenScene))
-                    return;
+                    return NoteRejectedMessage(type, bytes, "shorter than its header");
                 const auto* hdr = reinterpret_cast<const proto::RenScene*>(data);
+                // 64-bit throughout: batchCount * 16 + vertexCount * 32 tops out at 2^38, so this
+                // cannot wrap, and `bytes` being a u32 already caps what the resize below can be
+                // asked for - the caps are here because a vertex count near that cap is still 96 GB.
                 const std::uint64_t need = sizeof(*hdr) + std::uint64_t(hdr->batchCount) * sizeof(proto::RenBatch) +
                                            std::uint64_t(hdr->vertexCount) * sizeof(proto::RenVertex);
-                if (!hdr->batchCount || !hdr->vertexCount || bytes < need)
-                    return;
+                if (!hdr->batchCount || !hdr->vertexCount)
+                    return NoteRejectedMessage(type, bytes, "an empty scene");
+                if (hdr->batchCount > kMaxSceneBatches || hdr->vertexCount > kMaxSceneVertices)
+                    return NoteRejectedMessage(type, bytes, "more than a frame of entities can hold");
+                if (bytes < need)
+                    return NoteRejectedMessage(type, bytes, "it claims more than it carries");
                 g_scene.origin[0] = hdr->originX;
                 g_scene.origin[1] = hdr->originY;
                 g_scene.origin[2] = hdr->originZ;
                 const auto* batches = reinterpret_cast<const proto::RenBatch*>(data + sizeof(*hdr));
                 const auto* verts = reinterpret_cast<const proto::RenVertex*>(batches + hdr->batchCount);
+                // Cleared here rather than on the way in: a scene we cannot read is a message we
+                // skipped, and the previous frame's entities are still the right picture to keep
+                // rather than the empty one.
+                g_scene.batches.clear();
+                g_scene.vertices.clear();
                 g_scene.vertices.resize(hdr->vertexCount);
                 for (std::uint32_t b = 0; b < hdr->batchCount; ++b) {
                     const auto& batch = batches[b];
-                    if (batch.first + batch.count > hdr->vertexCount || batch.count < 3)
+                    // first + count cannot be added first: both are u32 and the sum wraps, and a
+                    // wrapped sum then walks this loop off the end of the vertex vector.
+                    if (batch.count < 3 || batch.first > hdr->vertexCount || batch.count > hdr->vertexCount - batch.first)
                         continue;
                     const bool blended = (batch.flags & 1) != 0;
                     for (std::uint32_t i = batch.first; i < batch.first + batch.count; ++i) {
@@ -467,19 +604,22 @@ namespace
         proj.m[3][2] = -zn * zf / (zf - zn);
     }
 
+    // A draw call of ours that came back failed. The first one in a 5 s window is named with its HRESULT
+    // and the rest are only counted: once a driver has refused a state, naming every attempt buries
+    // the one line that says which state it was.
     void Checked(HRESULT hr)
     {
         if (SUCCEEDED(hr))
             return;
-        if (!g_drawFailures) {
-            g_lastDrawFailure = hr;
+        if (!g_drawFailures)
             mclog::Info("blocks: our draw call failed ({:08x})", static_cast<unsigned>(hr));
-        }
         ++g_drawFailures;
     }
 
     Matrix Multiply(const Matrix& a, const Matrix& b);  // defined below, near its row-vector helpers
     void   DrawEntities(void* device, const proto::WorldEntities* entities);  // defined below
+    void   CheckSurfaceVtable(void* surface, const char* what, UINT backW, UINT backH, void* device);  // defined below
+    void   CheckTextureVtable();  // defined below
 
     void XformPoint(const float p[3], const Matrix& m, float out[4])
     {
@@ -487,18 +627,24 @@ namespace
             out[j] = p[0] * m.m[0][j] + p[1] * m.m[1][j] + p[2] * m.m[2][j] + m.m[3][j];
     }
 
-    void DrawWorld(void* device, const Runtime& st, UINT w, UINT h)
+    // The world pass: Minecraft's blocks, its entities and the outline of the block it is looking
+    // at, from the world camera, into whatever scene is running. False when it had nothing it could
+    // draw (no atlas yet, no mapping, no eye), so the caller can leave the frame open for another
+    // moment instead of marking the blocks as in.
+    bool DrawWorld(void* device, const Runtime& st, UINT w, UINT h)
     {
         if (!g_atlas || !Mapping::Get().Calibrated())
-            return;
+            return false;
         // Our blocks live in MP2 world space and our eye is st.camera, so the view is built from it
         // directly. MP2's own view matrices are rotation-only (its scene rides on identity views with
         // the camera baked into the world matrices — "world matrices moved" in the log), so they
-        // carry no eye translation and would displace every block off screen.
+        // carry no eye translation and would displace every block off screen. This holds in every
+        // BlocksMode: the mode picks when the pass runs, never what it is drawn from, which is why
+        // none of them can turn into a weapon-space draw.
         Matrix         view{}, proj{};
         mp2::Matrix4x3 eye{};
         if (!BlocksCamera(st, eye))
-            return;
+            return false;
         ComputeCameraFrom(eye, st.fovDeg, view, proj, w, h);
         if (const Matrix* scene = SceneProjection())
             proj = *scene;  // the projection MP2's world was drawn with this frame
@@ -628,6 +774,7 @@ namespace
             VCall<dev::SetTextureStageState>(device, 0u, UINT(kTssAlphaArg1), DWORD(kTaDiffuse));
             VCall<dev::DrawPrimitiveUP>(device, UINT(kPtLineList), 12u, static_cast<const void*>(lines), UINT(sizeof(Vertex)));
         }
+        return true;
     }
 
     // ---- Minecraft's entities ------------------------------------------------------------------
@@ -809,19 +956,24 @@ namespace
     {
         auto& link = Link::Get();
         if (link.AcquireOverlayFrame()) {
-            const auto*   hdr = link.FrontHeader();
-            const UINT    ow = (std::min)(hdr->width, proto::kMaxOverlayW), oh = (std::min)(hdr->height, proto::kMaxOverlayH);
-            const auto*   pixels = ow && oh ? link.FrontPixels(ow, oh) : nullptr;
-            if (pixels) {
-                if (!g_overlay || g_overlayW != ow || g_overlayH != oh) {
-                    Release(g_overlay);
-                    g_overlay = CreateTexture(device, ow, oh);
-                    g_overlayW = ow;
-                    g_overlayH = oh;
-                }
-                if (g_overlay) {
-                    UploadRgba(g_overlay, 0, 0, ow, oh, pixels, ow * 4, (hdr->flags & 1) != 0);
-                    g_haveOverlay = true;
+            // FrontHeader() is a second look at the control word AcquireOverlayFrame() just
+            // exchanged, and it is [[nodiscard]] because it can come back null: a frame we cannot
+            // read leaves the previous overlay up for one frame instead of trusting a header we do
+            // not have.
+            if (const auto* hdr = link.FrontHeader()) {
+                const UINT ow = (std::min)(hdr->width, proto::kMaxOverlayW), oh = (std::min)(hdr->height, proto::kMaxOverlayH);
+                const auto* pixels = ow && oh ? link.FrontPixels(ow, oh) : nullptr;
+                if (pixels) {
+                    if (!g_overlay || g_overlayW != ow || g_overlayH != oh) {
+                        Release(g_overlay);
+                        g_overlay = CreateTexture(device, ow, oh);
+                        g_overlayW = ow;
+                        g_overlayH = oh;
+                    }
+                    if (g_overlay) {
+                        UploadRgba(g_overlay, 0, 0, ow, oh, pixels, ow * 4, (hdr->flags & 1) != 0);
+                        g_haveOverlay = true;
+                    }
                 }
             }
         }
@@ -866,9 +1018,73 @@ namespace
         }
     }
 
-    // Called inside MP2's own scene (our EndScene hook): its depth buffer still belongs to the 3D
-    // scene it just drew, so blocks keep their occlusion.
-    void DrawWorldAtEndScene(void* device)
+    // ---- Which moment the block pass runs in ---------------------------------------------------
+    // Two of the three moments are chosen by Config::drawAtEndScene, a bool: off is the automatic
+    // order (the best moment, then the next, then the fallback), on is the world scene's own end on
+    // its own. The third is blocksNoDepth, which is not a mode of its own so much as the reason to
+    // want one: it asks for the blocks over everything, which is exactly what a Present-only draw
+    // already does with the depth test off, so it is also what pins the pass there. That is why the
+    // default is kAuto - it is the only mode that gets the best occlusion when MP2 offers it, and
+    // still finds a world moment when it does not.
+    enum class BlocksMode
+    {
+        kAuto,      // before the weapon clear, else the world scene's end, else Present
+        kEndScene,  // the world scene's end only, else Present
+        kPresent,   // never inside MP2's scene: no world depth, blocks over the picture
+    };
+    BlocksMode BlocksDrawMode()
+    {
+        if (Config::Get().blocksNoDepth)
+            return BlocksMode::kPresent;
+        return Config::Get().drawAtEndScene ? BlocksMode::kEndScene : BlocksMode::kAuto;
+    }
+    const char* BlocksModeName(BlocksMode mode)
+    {
+        switch (mode) {
+        case BlocksMode::kEndScene: return "world scene end";
+        case BlocksMode::kPresent:  return "present only";
+        default:                    return "before weapon clear";
+        }
+    }
+    // Whether this mode may use the pre-weapon-clear moment: only the automatic one, which is the
+    // mode that tries every moment in order. kEndScene deliberately skips it so the blocks' depth
+    // does not depend on MP2 happening to draw a weapon that frame.
+    bool UsesWeaponClear(BlocksMode mode) { return mode == BlocksMode::kAuto; }
+    // Whether this mode may draw inside MP2's scene at all. Present is always available as the
+    // fallback, so nothing is lost by a mode declining the scene.
+    bool UsesWorldScene(BlocksMode mode) { return mode != BlocksMode::kPresent; }
+
+    // Everything a pass changes on the device has to come back even if the pass throws: g_ownDraw left
+    // set would make every later SetTransform and SetRenderState of MP2's bypass the hooks for the
+    // rest of the session, and a state block never applied hands MP2 our render states instead of its
+    // own. A scope guard so the undo cannot be skipped by an early return or a bad_alloc from a
+    // garbled vertex count. Nothing in the guards throws.
+    struct ScenePassGuard
+    {
+        ScenePassGuard(void* device, const Viewport& viewport) : device_(device), viewport_(viewport) { g_ownDraw = true; }
+        ~ScenePassGuard()
+        {
+            g_ownDraw = false;
+            VCall<dev::SetViewport>(device_, &viewport_);
+            if (g_stateBlock)
+                VCall<dev::ApplyStateBlock>(device_, g_stateBlock);
+        }
+        ScenePassGuard(const ScenePassGuard&) = delete;
+        ScenePassGuard& operator=(const ScenePassGuard&) = delete;
+        void*    device_;
+        Viewport viewport_;
+    };
+
+    // Draw the world pass inside MP2's own scene, with its depth buffer still holding the level.
+    // True when something reached the screen, so the caller can leave the frame open for another
+    // moment if it could not (no atlas yet, no camera yet) instead of marking the blocks as in.
+    //
+    // The state block is captured BEFORE the draw and applied after it, and that order is the whole
+    // point: CaptureStateBlock records the states as they are at that moment, so capturing after
+    // our own SetRenderState calls would save them and hand them straight back to MP2. The viewport
+    // is saved and restored by hand as well, because the same state block is shared with the Present
+    // pass and the two run at different sizes.
+    bool DrawWorldInScene(void* device)
     {
         const Runtime& st = State();
         if (!g_stateBlock)
@@ -879,44 +1095,76 @@ namespace
         VCall<dev::GetViewport>(device, &saved);
         const Viewport full{ 0, 0, saved.Width ? saved.Width : 1280u, saved.Height ? saved.Height : 720u, 0.0f, 1.0f };
         VCall<dev::SetViewport>(device, &full);
-        g_ownDraw = true;
-        Guarded([&] { DrawWorld(device, st, full.Width, full.Height); });
-        g_ownDraw = false;
-        VCall<dev::SetViewport>(device, &saved);
-        if (g_stateBlock)
-            VCall<dev::ApplyStateBlock>(device, g_stateBlock);
+        bool drew = false;
+        ScenePassGuard pass{ device, saved };  // g_ownDraw on, viewport and states back when it ends
+        Guarded([&] { drew = DrawWorld(device, st, full.Width, full.Height); });
+        return drew;
     }
 
     HRESULT __stdcall BeginSceneHook(void* device)
     {
         g_sceneHadPerspective = false;
+        g_depthClearedThisScene = false;
         return g_origBeginScene(device);
     }
 
+    // Everything the scene has to have done before the blocks can be drawn into it, whatever moment
+    // of the scene that is. The mode is not part of it: which moment may be used is the hooks' call.
+    //
+    // HaveBlocksCamera is the part that matters here. Minecraft's eye (st.camera) is the camera
+    // whenever puppeting, and only when it is not - cut-scenes, MP2 holding Max, menus over the
+    // world - does this fall back to MP2's own render camera, which Camera.cpp only refreshes while
+    // MP2 renders a 3D scene and now expires after characters::kPausedMs. A frame with neither
+    // draws nothing: that is the right answer, because a stale camera would put the blocks in a
+    // place the player is not looking from, and the block outline (the aiming aid this pass exists
+    // for) would then sit somewhere the player cannot reach. g_noCamera counts the moments that found
+    // no camera, so a user who sees blocks flicker during a cut-scene can read why. Nothing is left
+    // latched: the counter is cleared at the end of every Present, so the next frame with a camera
+    // draws as usual.
     bool ReadyForBlocks()
     {
         const Runtime& st = State();
-        return !g_ownDraw && !g_blocksDrawnThisFrame && g_frameSceneDraws >= 8 && HaveBlocksCamera(st) && st.mcInWorld && !Config::Get().blocksNoDepth;
+        const bool      haveCamera = HaveBlocksCamera(st);
+        if (!haveCamera)
+            ++g_noCamera;
+        return !g_ownDraw && !g_blocksDrawnThisFrame && g_frameSceneDraws >= 8 && haveCamera && st.mcInWorld;
     }
 
+    // The world scene's own end. Skipped when MP2 has already wiped its depth buffer in this scene:
+    // the depth left would be the weapon's, and testing blocks against it draws them over MP2's
+    // walls - the same wrong picture the Present fallback gives, only less visibly. Those frames
+    // fall through to Present, where the 5 s log's "at present" counter says so.
     HRESULT __stdcall EndSceneHook(void* device)
     {
-        if (g_sceneHadPerspective && ReadyForBlocks()) {
-            DrawWorldAtEndScene(device);
-            g_blocksDrawnThisFrame = true;
-            ++g_drawnAtEndScene;
+        const BlocksMode mode = BlocksDrawMode();
+        if (UsesWorldScene(mode) && g_sceneHadPerspective && !g_depthClearedThisScene && ReadyForBlocks()) {
+            if (DrawWorldInScene(device)) {
+                g_blocksDrawnThisFrame = true;
+                ++g_drawnAtEndScene;
+            }
         }
         return g_origEndScene(device);
     }
 
-    // MP2 clearing its depth buffer after the world is drawn: the blocks go in first.
+    // MP2 clearing its depth buffer for its weapon / HUD: the last instant its depth buffer still
+    // holds the level. Recorded even when the blocks are not drawn here, because a scene that wiped
+    // its depth is past its world moment and the EndScene hook has to know that.
     HRESULT __stdcall ClearHook(void* device, DWORD count, const void* rects, DWORD flags, DWORD color, float z, DWORD stencil)
     {
         constexpr DWORD kClearZBuffer = 2;
-        if ((flags & kClearZBuffer) && ReadyForBlocks()) {
-            DrawWorldAtEndScene(device);
-            g_blocksDrawnThisFrame = true;
-            ++g_drawnAtClear;
+        if (flags & kClearZBuffer) {
+            // A clear that arrives after MP2 has drawn is it throwing a world away (the weapon / HUD
+            // pass); one that arrives before anything has been drawn since the last clear is just a
+            // scene opening its depth buffer, which is not the end of any world.
+            if (g_drawsSinceClear)
+                g_depthClearedThisScene = true;
+            g_drawsSinceClear = 0;
+        }
+        if ((flags & kClearZBuffer) && UsesWeaponClear(BlocksDrawMode()) && ReadyForBlocks()) {
+            if (DrawWorldInScene(device)) {
+                g_blocksDrawnThisFrame = true;
+                ++g_drawnAtClear;
+            }
         }
         return g_origClear(device, count, rects, flags, color, z, stencil);
     }
@@ -972,22 +1220,54 @@ namespace
         }
         if (w && h) {
             characters::OnPresent(w, h);
-            Link::Get().DrainRender([&](std::uint32_t type, const std::uint8_t* data, std::uint32_t bytes) { OnRenderMessage(device, type, data, bytes); },
-                                    8ull << 20);
+            // The budget is per frame against a 64 MB ring, so a frame that produced more than this
+            // leaves the rest queued rather than throwing it away: the next drain starts where this
+            // one stopped. That is why g_renderBacklog is the number to read when blocks appear a
+            // beat late - the messages are late, not lost.
+            const std::uint64_t budget = 8ull << 20;
+            std::uint64_t       drained = 0;
+            Link::Get().DrainRender(
+                [&](std::uint32_t type, const std::uint8_t* data, std::uint32_t bytes) {
+                    drained += sizeof(proto::ColMsgHeader) + std::uint64_t(bytes);
+                    OnRenderMessage(device, type, data, bytes);
+                },
+                budget);
+            if (drained >= budget) {
+                static DWORD lastBacklogLog = 0;
+                ++g_renderBacklog;
+                if (GetTickCount() - lastBacklogLog > 5000) {
+                    lastBacklogLog = GetTickCount();
+                    mclog::Info("render: render ring still had messages after {} MB this frame; Minecraft is producing more than one frame's worth", drained >> 20);
+                }
+            }
 
-            // Once per device: does one exist, and what is it?
+            // Once per device: does a depth stencil exist, what does it say, and is D3D8.h's slot for
+            // reading a surface description the right one? Both halves of that question once per
+            // device, because neither changes until the device does.
             static void* depthLoggedFor = nullptr;
             if (device != depthLoggedFor) {
                 depthLoggedFor = device;
                 void* depth = nullptr;
-                if (SUCCEEDED(VCall<dev::GetDepthStencilSurface>(device, &depth))) {
+                if (SUCCEEDED(VCall<dev::GetDepthStencilSurface>(device, &depth)) && depth) {
                     SurfaceDesc desc{};
                     if (SUCCEEDED(VCall<surf::GetDesc>(depth, &desc)))
                         mclog::Info("render: depth stencil {}x{} format {} multisample {}", desc.Width, desc.Height, desc.Format, desc.MultiSampleType);
-                    Release(depth);
                 } else {
                     mclog::Info("render: no depth stencil attached");
+                    depth = nullptr;
                 }
+                // Both surfaces through both candidate slots, while they are still held: w and h are
+                // this frame's back buffer size, which is the yardstick both descriptions are judged
+                // against. Every one of these reads its own copy of the words, so nothing here
+                // changes what Present does with either surface afterwards.
+                void* checkBuffer = nullptr;
+                if (SUCCEEDED((VCall<dev::GetBackBuffer>(device, 0u, UINT(kBackBufferMono), &checkBuffer))) && checkBuffer) {
+                    CheckSurfaceVtable(checkBuffer, "back buffer", w, h, device);
+                    Release(checkBuffer);
+                }
+                CheckSurfaceVtable(depth, "depth stencil", w, h, device);
+                Release(depth);
+                CheckTextureVtable();
             }
 
             const Runtime& st = State();
@@ -1000,41 +1280,132 @@ namespace
                 VCall<dev::GetViewport>(device, &saved);
                 const Viewport full{ 0, 0, w, h, 0.0f, 1.0f };
                 VCall<dev::SetViewport>(device, &full);
+                // The overlay draws on top whatever the blocks did, so the pass runs even when the
+                // blocks were already in inside MP2's scene; only the block draw is guarded.
                 if (SUCCEEDED((VCall<dev::BeginScene>(device)))) {
-                    g_ownDraw = true;
+                    ScenePassGuard pass{ device, saved };
                     Guarded([&] {
+                        // The fallback moment: inside MP2's scene the blocks kept the world's depth,
+                        // here there is none, so this path is always the one where MP2's walls cannot
+                        // occlude. It draws only what the scene hooks did not, so no frame ever draws
+                        // the blocks twice.
                         if (HaveBlocksCamera(st) && !g_blocksDrawnThisFrame) {
-                            DrawWorld(device, st, w, h);
-                            ++g_drawnAtPresent;
+                            if (DrawWorld(device, st, w, h)) {
+                                g_blocksDrawnThisFrame = true;
+                                ++g_drawnAtPresent;
+                            }
                         }
                         DrawOverlay(device, st, w, h);
                     });
-                    g_ownDraw = false;
                     VCall<dev::EndScene>(device);
+                } else {
+                    VCall<dev::SetViewport>(device, &saved);
+                    if (g_stateBlock)
+                        VCall<dev::ApplyStateBlock>(device, g_stateBlock);
                 }
-                VCall<dev::SetViewport>(device, &saved);
-                if (g_stateBlock)
-                    VCall<dev::ApplyStateBlock>(device, g_stateBlock);
             }
         }
         static DWORD lastLog = 0;
         if (GetTickCount() - lastLog > 5000) {
             lastLog = GetTickCount();
             mclog::Info("render: view set {} times, replaced {}, world matrices moved {}; scene projection {}; {} block sections, {} block "
-                        "triangles drawn (frames drawn before depth clear {}, at scene end {}, at present {}), {} entity triangles, {} entity "
-                        "textures, atlas {}, scene z mode {}, "
-                        "shader constants moved {}, our draw failures {}",
+                        "triangles drawn (mode {}, frames drawn before depth clear {}, at scene end {}, at present {}), {} entity triangles, {} "
+                        "entity textures, atlas {}, scene z mode {}, "
+                        "shader constants moved {}, our draw failures {}, messages refused {}, ring over budget {} frames, moments with no camera {}",
                         g_viewSets, g_viewReplaced, g_worldCorrected, g_haveProj ? "seen" : "not seen", g_sections.size(), g_trianglesDrawn,
-                        g_drawnAtClear, g_drawnAtEndScene, g_drawnAtPresent, g_entityTrianglesDrawn, g_entityTextures.size(),
-                        g_atlas ? "yes" : "no", g_sceneZEnable, g_constantsMoved, g_drawFailures);
+                        BlocksModeName(BlocksDrawMode()), g_drawnAtClear, g_drawnAtEndScene, g_drawnAtPresent, g_entityTrianglesDrawn,
+                        g_entityTextures.size(), g_atlas ? "yes" : "no", g_sceneZEnable, g_constantsMoved, g_drawFailures, g_rejectedMessages,
+                        g_renderBacklog, g_noCamera);
             g_viewSets = g_viewReplaced = g_worldCorrected = g_trianglesDrawn = g_constantsMoved = g_drawFailures = 0;
             g_drawnAtClear = g_drawnAtEndScene = g_drawnAtPresent = g_entityTrianglesDrawn = 0;
+            g_rejectedMessages = g_renderBacklog = g_noCamera = 0;
         }
-        g_haveView = g_haveProj = false;  // MP2 sets them again each frame
+        // The per-frame flags are cleared here, at the one point every frame reaches whether or not
+        // anything was drawn: the w/h, mcInWorld and BeginScene branches above all fall through to
+        // this, so a frame with no back buffer yet cannot leave the next one thinking it drew blocks.
+        g_haveProj = false;
         g_frameSceneDraws = 0;
+        g_drawsSinceClear = 0;
         g_frameProjCount = 0;
         g_blocksDrawnThisFrame = false;
         return g_origPresent(device, src, dst, window, dirty);
+    }
+
+    // ---- D3D8 vtable self-check ----------------------------------------------------------------
+    // D3D8.h hand-declares three things the SDK no longer ships and that do not agree with the
+    // published Direct3D 8 vtables: surf::GetDesc, tex::LockRect/UnlockRect, and SurfaceDesc's field
+    // order. They all work in every captured session, which is exactly why they must not be "fixed"
+    // from the header alone. Once per device, at the two points the log already describes a surface,
+    // each candidate slot is read for real and the sane one is named: which slot fills a
+    // width/height matching the back buffer, and where those two fields actually sit in the struct.
+    // A user reads one session of this instead of trusting the header.
+    void CheckSurfaceVtable(void* surface, const char* what, UINT backW, UINT backH, void* device)
+    {
+        // Once per device per surface, so the back buffer and the depth stencil are each asked once.
+        static void* done[2]{};
+        const int     slot = std::strcmp(what, "back buffer") == 0 ? 0 : 1;
+        if (!surface || device == done[slot])
+            return;
+        done[slot] = device;
+        // Read into words, not into a struct: the two candidate field orders disagree about where
+        // Width and Height are (words 7/8 in D3D8.h's SurfaceDesc, 9/10 in the SDK's), and reading
+        // raw is the only way the log can show which one the runtime actually filled. Poisoned
+        // first, so a slot that is not a description getter at all shows up as untouched words
+        // rather than as zeroes that could be mistaken for a real (zero-sized) description.
+        DWORD       words[12];
+        for (DWORD& word : words)
+            word = 0xDDDDDDDDu;
+        const DWORD ourHr = VCall<surf::GetDesc, HRESULT, DWORD*>(surface, words);
+        DWORD       alt[12];
+        for (DWORD& word : alt)
+            word = 0xDDDDDDDDu;
+        const DWORD altHr = VCall<surf::GetDescAlt, HRESULT, DWORD*>(surface, alt);
+        // The back buffer's own size is the yardstick: this file has already trusted it for the
+        // viewport every frame, so a candidate that does not reproduce it did not describe anything.
+        auto        reads = [&](const DWORD* w, bool answered) {
+            const UINT ourW = answered ? w[7] : 0u, ourH = answered ? w[8] : 0u;
+            const UINT sdkW = answered ? w[9] : 0u, sdkH = answered ? w[10] : 0u;
+            if (backW && ourW == backW && ourH == backH)
+                return std::format("{}x{} (D3D8.h's field order)", ourW, ourH);
+            if (backW && sdkW == backW && sdkH == backH)
+                return std::format("{}x{} (the SDK's field order)", sdkW, sdkH);
+            return std::format("{}x{} / SDK order {}x{} - neither is the back buffer", ourW, ourH, sdkW, sdkH);
+        };
+        mclog::Info("render: d3d8 vtable self-check, {} ({}): slot {} read {}, slot {} read {}", what,
+                    backW ? std::format("back buffer is {}x{}", backW, backH) : "no back buffer size", surf::GetDesc,
+                    reads(words, SUCCEEDED(ourHr)), surf::GetDescAlt, reads(alt, SUCCEEDED(altHr)));
+        mclog::Info("render: d3d8 vtable self-check: raw words, {} through slot {}: {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} "
+                    "{:08x} {:08x}; through slot {}: {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} (0xdddddddd = untouched)",
+                    what, surf::GetDesc, words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7], words[8], words[9],
+                    words[10], surf::GetDescAlt, alt[0], alt[1], alt[2], alt[3], alt[4], alt[5], alt[6], alt[7], alt[8], alt[9], alt[10]);
+        mclog::Info("render: d3d8 vtable self-check: the {} keeps slot {} with D3D8.h's SurfaceDesc layout because that is what every captured "
+                    "session read with; if the line above says the SDK's field order is the right one, D3D8.h's SurfaceDesc order is wrong and the "
+                    "'depth stencil {{}}x{{}}' line has been reading Pool and Size",
+                    what, surf::GetDesc);
+    }
+
+    // The same question for the atlas: tex::LockRect is 16/17, the SDK's table says 13/14, and both
+    // pairs answered in the sessions where the atlas probe read a plausible texel. Asked once, on one
+    // texel of the atlas so nothing else is disturbed: the pair that locks is the one in use.
+    void CheckTextureVtable()
+    {
+        static void* loggedFor = nullptr;
+        if (!g_atlas || !g_device || g_device == loggedFor)
+            return;
+        loggedFor = g_device;
+        RECT       rect{ 0, 0, 1, 1 };
+        LockedRect ours{}, alt{};
+        const bool oursLocked = SUCCEEDED(VCall<tex::LockRect>(g_atlas, 0u, &ours, &rect, DWORD(0))) && ours.pBits != nullptr;
+        if (oursLocked)
+            VCall<tex::UnlockRect>(g_atlas, 0u);
+        const bool altLocked = SUCCEEDED(VCall<tex::LockRectAlt>(g_atlas, 0u, &alt, &rect, DWORD(0))) && alt.pBits != nullptr;
+        if (altLocked)
+            VCall<tex::UnlockRectAlt>(g_atlas, 0u);
+        mclog::Info("render: d3d8 vtable self-check: atlas lock slot {} gave {}, slot {} gave {} (atlas {}x{}, texel read back {:08x} / {:08x}); "
+                    "the pair in use is the one that locked - edit D3D8.h only on the strength of this",
+                    tex::LockRect, oursLocked ? "a texel" : "nothing", tex::LockRectAlt, altLocked ? "a texel" : "nothing", g_atlasW, g_atlasH,
+                    oursLocked ? *reinterpret_cast<const std::uint32_t*>(ours.pBits) : 0u,
+                    altLocked ? *reinterpret_cast<const std::uint32_t*>(alt.pBits) : 0u);
     }
 
     HRESULT __stdcall Reset(void* device, PresentParameters* params)
@@ -1183,7 +1554,6 @@ namespace
         // (doors, props...) with an identity view and the camera baked into their world matrix.
         // The first gets Minecraft's eye as its view; the second gets its world matrix moved from
         // MP2's camera to ours: world * inverse(mp2View) * ourView.
-        static Matrix pendingView{};
         static bool   perspective = false;
         static bool   viewIsIdentity = false;
         static Matrix ours{}, correction{}, corrected{};
@@ -1193,10 +1563,8 @@ namespace
         if (state == kTsView) {
             ++g_viewSets;
             viewIsIdentity = IsIdentity(*matrix);
-            if (!viewIsIdentity && perspective) {
-                ++g_frameSceneDraws;
-                NoteSceneProjection();
-            }
+            if (!viewIsIdentity && perspective)
+                NoteSceneDraw();
             if (st.cameraValid && !viewIsIdentity) {
                 Matrix unusedProj{};
                 ComputeCamera(st, ours, unusedProj, 16, 9);
@@ -1208,8 +1576,7 @@ namespace
                 ++g_viewReplaced;
             }
         } else if (state == kTsWorld && viewIsIdentity && perspective) {
-            ++g_frameSceneDraws;
-            NoteSceneProjection();
+            NoteSceneDraw();
             if (st.cameraValid && haveCorrection) {
                 corrected = Multiply(*matrix, correction);
                 matrix = &corrected;
@@ -1219,31 +1586,22 @@ namespace
         if (!st.cameraValid)
             haveCorrection = g_haveCorrection = false;
 
-        if (state == kTsView) {
-            pendingView = *matrix;
-            if (perspective) {
-                g_view = *matrix;
-                g_haveView = true;
-            }
-            // Also capture views set before the projection (or after it, which MP2 does): the eye
-            // translation is what our blocks need, and identity views (the UI) must not provide it.
-            if (!viewIsIdentity) {
-                g_view = *matrix;
-                g_haveView = true;
-            }
-        } else if (state == kTsProjection) {
+        // The projection is the only matrix of MP2's the blocks take: the view is rotation-only
+        // (see the correction above) and is rebuilt from Minecraft's eye by DrawWorld every frame.
+        if (state == kTsProjection) {
             perspective = matrix->m[2][3] != 0.0f && matrix->m[3][3] == 0.0f;
             g_perspectiveActive = perspective;
             if (perspective)
                 g_sceneHadPerspective = true;
-            if (perspective && std::memcmp(&g_mp2Proj, matrix, sizeof(Matrix)) != 0) {
-                g_mp2Proj = *matrix;
-                g_haveProjInverse = Inverse4(g_mp2Proj, g_mp2ProjInverse);
-            }
             if (perspective) {
                 g_proj = *matrix;
-                g_view = pendingView;
-                g_haveProj = g_haveView = true;
+                g_haveProj = true;
+                // g_mp2Proj and its inverse are the correction's own pair, so they must follow the
+                // last projection actually seen even when it repeats the previous one.
+                if (std::memcmp(&g_mp2Proj, matrix, sizeof(Matrix)) != 0) {
+                    g_mp2Proj = *matrix;
+                    g_haveProjInverse = Inverse4(g_mp2Proj, g_mp2ProjInverse);
+                }
             }
         }
         return g_origSetTransform(device, state, matrix);

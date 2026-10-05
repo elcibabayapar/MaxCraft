@@ -79,6 +79,12 @@ namespace
     {
         if (!reserved)
             return;
+        // Stop the producer before the mapping goes: the collision worker is the one thread that can
+        // be inside Link::WriteCollision() holding a pointer into the views, and unmapViewOfFile
+        // under it would fault in a thread we are already tearing down. Safe here and only here,
+        // because process termination has stopped every other thread already - the join returns at
+        // once instead of waiting for a worker that is not running any more.
+        collision::StopWorker();
         Link::Shutdown();
     }
 }

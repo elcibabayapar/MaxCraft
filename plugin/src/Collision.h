@@ -14,6 +14,11 @@
 namespace collision
 {
     bool Install();
+    // Stops the worker and waits for it, so nothing can be inside Link::WriteCollision() while the
+    // shared memory is unmapped. Only legal when the game is already terminating: ExitProcess has
+    // stopped every other thread by then, and this is the one moment a join is both possible and
+    // necessary. Idempotent.
+    void StopWorker();
     // New epoch: Minecraft drops what it has; everything is sent again.
     void Reset(std::uint32_t epoch);
     // The level is unloading: forget its geometry.

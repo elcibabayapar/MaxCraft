@@ -630,9 +630,19 @@ namespace
     // DLL_PROCESS_ATTACH, and main.cpp is not ours to change, so a static destructor is the only
     // hook we have. It only sets a flag: joining a thread under the loader lock is not allowed, and
     // SendBlocking polls the flag, so the worker is gone within one message.
+    //
+    // It also detaches if nobody joined yet. WorkerStopper is registered after the namespace-scope
+    // std::thread, so it is destroyed first; without this the thread object's own destructor would
+    // run with the thread still joinable and call std::terminate() at exit.
     struct WorkerStopper
     {
-        ~WorkerStopper() { g_stop.store(true, std::memory_order_relaxed); }
+        ~WorkerStopper()
+        {
+            g_stop.store(true, std::memory_order_relaxed);
+            g_jobCv.notify_all();
+            if (g_worker.joinable())
+                g_worker.detach();  // never leave it joinable: ~std::thread would terminate
+        }
     };
 }
 
@@ -640,8 +650,17 @@ bool collision::Install()
 {
     static WorkerStopper stopper;  // registered before the thread starts
     g_worker = std::thread(WorkerLoop);
-    g_worker.detach();
     return InstallHook(api.allocateRigidBodyRoom, reinterpret_cast<void*>(&AllocRoom), g_origAllocRoom, "X_RigidBodyRoom::allocateRigidBodyRoom");
+}
+
+void collision::StopWorker()
+{
+    g_stop.store(true, std::memory_order_relaxed);
+    // Wake the wait, not just the flag: SendBlocking's Sleep(5) loop is polled, but the condition
+    // variable's predicate needs the notification or the thread sits in its wait.
+    g_jobCv.notify_all();
+    if (g_worker.joinable())
+        g_worker.join();  // returns immediately once the process has stopped every other thread
 }
 
 void collision::Reset(std::uint32_t epoch)

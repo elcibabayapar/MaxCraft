@@ -69,12 +69,16 @@ namespace
     // Link::Get()'s singleton, so Shutdown() can reach it without an instance. Cleared by Teardown().
     Link* g_link = nullptr;
 
-    // Registered by the first Create() that succeeds, and the only caller of Shutdown(): main.cpp's
-    // DllMain never hears DLL_PROCESS_DETACH, so a static destructor is the one hook there is. It is
-    // constructed after Link::Get()'s own singleton (that call comes first), and function-local
-    // statics are destroyed in the reverse order of their construction, so it runs while that
-    // object is still alive. Nothing here locks or logs: UnmapViewOfFile and CloseHandle cannot
-    // deadlock under the loader lock, and mclog::Write may already be past its own teardown.
+    // Registered by the first Create() that succeeds, as a second caller of Shutdown() beside main.cpp's
+    // OnDetach. On process termination OnDetach gets there first and does the ordered teardown
+    // (collision::StopWorker(), then this) - static destructors are not run at all on that path, so
+    // this is a harmless duplicate and Teardown() is idempotent. On FreeLibrary it is the *only*
+    // caller, because the loader lock forbids the ordered path there.
+    //
+    // It is constructed after Link::Get()'s own singleton (that call comes first), and function-local
+    // statics are destroyed in the reverse order of their construction, so it runs while that object
+    // is still alive. Nothing here locks or logs: UnmapViewOfFile and CloseHandle cannot deadlock
+    // under the loader lock, and mclog::Write may already be past its own teardown.
     struct LinkTearDown
     {
         ~LinkTearDown() { Link::Shutdown(); }

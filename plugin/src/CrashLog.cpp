@@ -46,8 +46,7 @@ namespace
                 *p++ = c;
         }
 
-        // {:#x}, {:08x} and {:02x} without std::format. `digits` is capped at 8 by the buffer in
-        // digitsOut, and no call site asks for more, so a zero-padded value is never cut in half.
+        // {:#x}, {:08x} and {:02x} without std::format.
         void Hex(std::uint32_t value, int digits, bool alt = false)
         {
             static const char kHex[] = "0123456789abcdef";
@@ -59,7 +58,18 @@ namespace
             } while (value && n < 8);
             if (alt)
                 Text("0x");
-            while (n < digits && p < end)
+            if (digits > 8)
+                digits = 8;  // out[] holds eight: padding further would write past it
+            // The padding counter is its own variable on purpose. `n` holds how many digits the value
+            // actually has and does not change here, so a `while (n < digits ...)` test would stay true
+            // and pad until the buffer filled - which is exactly what it used to do: any value with
+            // fewer significant digits than `digits` buried the rest of the report under hundreds of
+            // '0' characters, so a crash log read as
+            //   eax 000000000000... (511 characters)
+            // and every register, the stack words and the code bytes were gone. Only values with at
+            // least `digits` significant digits came out right, which is why the exception code (8
+            // digits, asked for 1) survived and nothing after it did.
+            for (int pad = n; pad < digits && p < end; ++pad)
                 *p++ = '0';
             while (n && p < end)
                 *p++ = out[--n];

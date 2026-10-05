@@ -1734,6 +1734,17 @@ namespace
 
 bool render::Install()
 {
+    // TEMPORARY DIAGNOSTIC: bNoRenderHooks=1 installs no D3D8 hook at all. The mod then runs with
+    // movement, collision and combat but draws nothing of Minecraft's: no blocks, no hand, no
+    // overlay. Windows logs the menu-to-3D crash as "unknown module, 0x001aface" with no EXCEPTION
+    // in ours, which means MP2 is reading through a pointer we computed rather than dereferencing
+    // null - and the only things we hand MP2 are matrices. If the game opens with this set, the
+    // crash is in the render path; if it still crashes, it is not.
+    static const bool kNoRenderHooks = Config::Get().noRenderHooks;
+    if (kNoRenderHooks) {
+        mclog::Info("render: NO D3D8 hooks installed (bNoRenderHooks=1, diagnostic) - Minecraft draws nothing");
+        return true;
+    }
     HMODULE d3d8 = LoadLibraryW(L"d3d8.dll");
     void*   create = d3d8 ? reinterpret_cast<void*>(GetProcAddress(d3d8, "Direct3DCreate8")) : nullptr;
     if (!create) {

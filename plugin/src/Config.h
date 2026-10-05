@@ -48,6 +48,9 @@ struct Config
     bool noViewFixup = false;
     bool noWvpFixup = false;
     bool noBlockDraw = false;
+    //   noRenderHooks - install no D3D8 hook at all. The widest of the switches: the mod runs with
+    // movement, collision and combat but draws nothing (no blocks, no hand, no overlay).
+    bool noRenderHooks = false;
     // Which moment of MP2's frame the blocks go in (Render.cpp's BlocksDrawMode() is the only reader).
     // Every mode draws the same world pass from the same world camera; this only picks when, and the
     // depth buffer it lands in is what decides occlusion:

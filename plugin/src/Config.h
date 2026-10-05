@@ -2,7 +2,9 @@
 
 #include <string>
 
-// MaxCraft.ini, next to maxpayne2.exe. Read once at startup; every value has a default.
+// MaxCraft.ini, next to maxpayne2.exe. Every value has a default, so a missing key or a value that
+// does not parse still loads. Read exactly once per process (a function-local static, hence the
+// "editing this needs a restart"): nothing else reads the file, and nothing writes to this struct.
 struct Config
 {
     // [Minecraft]
@@ -11,14 +13,16 @@ struct Config
     std::wstring arguments = L"--launch SkyCraft";
 
     // [World] how Max Payne 2's space maps onto Minecraft's.
-    float unitsPerBlock = 0.0f;  // 0: measured from Max's collision capsule (1.8 blocks tall)
-    int   upAxis = -1;           // 0 x, 1 y, 2 z; -1: from the capsule
+    // > 0: MP2 units per Minecraft block, pinned by the ini. <= 0: measured from Max's collision
+    // capsule, which is taken to be 1.8 blocks tall. Mapping.h spells the precedence out in full.
+    float unitsPerBlock = 0.0f;
+    int   upAxis = -1;           // 0 x, 1 y, 2 z: pinned by the ini; -1: measured from the capsule
     bool  flipZ = true;          // MaxFX is left-handed (Direct3D), Minecraft right-handed
     float feetOffset = 0.0f;     // MP2 units from the character origin down to the feet
     int   forwardRow = 2;        // which row of an MP2 transform is "forward"
     float gameHour = 12.0f;      // Minecraft's time of day (MP2 has no clock)
-    float bodyBehind = 0.7f;
-    bool  moveRenderCamera = true;  // move MP2's own render camera to Minecraft's eye (room visibility, effects)     // first person: Max's body this many blocks behind the eye (out of view)
+    float bodyBehind = 0.7f;     // first person: Max's body this many blocks behind the eye (out of view)
+    bool  moveRenderCamera = true;  // move MP2's own render camera to Minecraft's eye (room visibility, effects)
 
     // [Combat]
     float enemyDamageScale = 1.5f;   // Minecraft damage / 20 of an enemy's full health, times this
@@ -34,6 +38,8 @@ struct Config
     bool diagnostics = false;
     bool blocksNoDepth = false;    // draw Minecraft's blocks over everything
     bool blocksNoTexture = false;  // draw them untextured (vertex colour only): texture or transform?
+    // Render.cpp is what honours this, and it is the only reader: the block draws at MP2's EndScene
+    // and at Present both run unconditionally, so until it checks this field the key changes nothing.
     bool drawAtEndScene = false;   // draw blocks at MP2's EndScene, while its depth buffer is the scene's
 
     static const Config& Get();

@@ -28,7 +28,7 @@ Max Payne 2'yi bir Minecraft oyuncusu olarak oynayın: Minecraft fiziğiyle koş
 
 ## Kurulum
 
-1. [Releases](../../releases) sayfasından `MaxCraft-<sürüm>.zip` dosyasını indirip içeriğini Max Payne 2 klasörüne çıkarın (`maxpayne2.exe` ile aynı yere).
+1. Depoyu klonlayıp `git submodule update --init` çalıştırın, sonra `powershell -ExecutionPolicy Bypass -File tools\package.ps1`. Paket `dist\MaxCraft-<sürüm>.zip` olarak yazılır; script eklentiyi **x86** olarak derler ve Minecraft tarafını `extern/SkyCraft` alt modülüyle eşleşen SkyCraft sürümünden indirir. Sürüm tek yerde (`plugin/CMakeLists.txt`) tanımlıdır ve `package.ps1` onu oradan okur.
 2. Ultimate ASI Loader'ın x86 `dinput8.dll` dosyasını aynı klasöre **`dinput.dll`** adıyla kopyalayın. MP2 DirectInput'u `DINPUT.dll` üzerinden yüklediği için bu ad her zaman yüklenir.
 3. Oyunu başlatın. İlk açılışta MaxCraft, Minecraft tarafını `%LOCALAPPDATA%\SkyCraft` klasörüne açar ve küçük bir Prism Launcher penceresi Microsoft hesabınızla giriş yapmanızı ister. Alt-Tab ile o pencereye geçip giriş yapın, sonra oyuna dönün. Prism, Minecraft'ı ve Java'yı ilk seferde birkaç dakikada indirir.
 4. Bir bölüm başlatın. Minecraft hazır olduğunda kontrolü kendiliğinden alır.
@@ -39,31 +39,41 @@ SkyCraft'ı Skyrim için zaten kurduysanız iki mod aynı Minecraft kurulumunu v
 
 ## Kontroller
 
-Öncelik Minecraft'ındır. Şu tuşlar Max Payne 2'de kalır:
+Öncelik Minecraft'ındır. Max Payne 2'ye giden tuşlar:
 
 | Tuş | İşlev |
 |---|---|
-| Esc | MP2 menüsü (açık bir Minecraft ekranını da kapatır) |
-| G | MP2 eylem tuşu: kapılar, düğmeler (MP2'nin kendi tuşu) |
-| E | Minecraft envanteri |
-| V | MP2 Özellikleri |
-| F6 | MP2 hızlı kayıt (F5 Minecraft'ın kamera tuşu olduğu için) |
+| Esc | MP2 menüsü. Açık bir Minecraft ekranını da kapatır |
 | F9 | MP2 hızlı yükleme |
+| F6 | MP2 hızlı kayıt — F5 olarak iletilir, çünkü F5 Minecraft'ın kamera tuşu |
+| G | MP2 eylem tuşu: kapılar, düğmeler — E olarak iletilir, çünkü E Minecraft'ın envanter tuşu |
+| B (basılı) | MP2 bullet-time — basılı tutulduğu sürece MP2'nin sağ fare tuşu sayılır |
+| V | MP2 silah modunu aç/kapat: fare tuşları, tekerlek, 1-9 ve R MP2'ye gider, bakış Minecraft'da kalır |
 | O | Minecraft duraklatma ve ayarlar menüsü |
 
-Diğer bütün tuşlar Minecraft'ındır: F5 kamera, T sohbet, / komutlar, Shift eğilme vb. E ve I tuşları `MaxCraft.ini` içindeki `iUseKey` ve `iInventoryKey` ile, diğer tuşlar Minecraft'ın kendi ayarlarından değiştirilebilir.
+Bunların dışında **her tuş Minecraft'a gider**, E (envanter) ve F5 (kamera) dahil — onlar MP2 tarafından gizlenir. F5'in MP2'ye sızmasını engellemek bu eşlemenin en kırılgan yeridir: MP2 klavyeyi altı ayrı yoldan okuyor ve altısının da filtrelenmesi gerekiyor (DirectInput'un iki okuması, `GetAsyncKeyState`, `GetKeyState`, `GetKeyboardState`, pencere prosedürü ve `TranslateAcceleratorA`). F5 bir kez `TranslateAcceleratorA`'dan sızmıştı; bu yüzden artık altı yol da tek bir yönlendirme tablosunu sorar ve hiçbiri kendi başına karar vermez.
+
+Ayar dosyasındaki tuşlar:
+
+- `iQuickSaveKey` (varsayılan F6) → MP2'ye F5 olarak iletilir
+- `iUseKey` (varsayılan G) → MP2'ye E olarak iletilir
+- `iBulletTimeKey` (varsayılan B) → MP2'nin sağ fare tuşu olarak iletilir
+- `iWeaponModeKey` (varsayılan V) → silah modu anahtarı
+
+Esc ve F9 MP2'nin kendi bağlamalarıdır, `MaxCraft.ini` ile değiştirilemez. Geri kalan her şey Minecraft'ın kendi ayarlarından değişir. Etkin yönlendirme oyun açılışında `MaxCraft.log`'a bir satır olarak yazılır.
 
 ## Ayarlar
 
 `MaxCraft.ini` (oyun klasöründe) her ayarı açıklamasıyla birlikte içerir. Önemli olanlar:
 
-- **`fUnitsPerBlock`, `iUpAxis`, `bFlipZ`:** MP2 uzayının Minecraft'a nasıl eşlendiği. Varsayılan olarak Max'in çarpışma kapsülünden ölçülür (Max = 1,8 blok). Dünya aynalanmış görünürse `bFlipZ = 0` deneyin.
+- **`fUnitsPerBlock`, `iUpAxis`, `bFlipZ`:** MP2 uzayının Minecraft'a nasıl eşlendiği. `fUnitsPerBlock > 0` elle sabitler (varsayılan `1`: bir MP2 birimi = bir blok); `0` ya da daha küçükse ölçek Max'in çarpışma kapsülünden türetilir (1,8 blok = bir kapsül). `iUpAxis = -1` yukarı ekseni yine kapsülden seçer. Kullanılacak değer `MaxCraft.log`'a yazılır. Dünya aynalanmış görünürse `bFlipZ = 0` deneyin.
 - **`iForwardRow`:** Kamera yana bakıyorsa veya Max yan yürüyorsa 0 ya da 1 deneyin.
 - **`fEnemyDamageScale`, `fPlayerDamageScale`:** Dövüş dengesi.
 
 ## Bilinen sınırlar
 
-- **Henüz oyunda denenmedi.** İlk denemede en olası sorunlar ayar dosyasından düzeltilebilir: dünyanın ölçeği, yönü, kameranın baktığı yön. `MaxCraft.log` dosyasını bir issue'ya ekleyin.
+- **Hâlâ deneysel.** Temel hareket, kamera, arayüz, blok koyma/kırma ve düşman vuruşu çalışıyor, ama MP2 motoruna dair bir düzine kadar varsayım henüz oyunda doğrulanmadı (bkz. [docs/DESIGN.md](docs/DESIGN.md) §8). İlk denemede en olası sorunlar ayar dosyasından düzeltilebilir: dünyanın ölçeği, yönü, kameranın baktığı yön. `MaxCraft.log` dosyasını bir issue'ya ekleyin.
+- Açılışta aralıklı bir çökme (`maxpayne2.exe+0x1b80`) üzerinde çalışılıyor. MinHook kurulumu tek seferde yapılacak şekilde değiştirildi; bu pencereyi daraltır ama çözdüğü kanıtlanmış değildir.
 - Sadece statik seviye geometrisi çarpışmaya aktarılıyor. Kapılar, kutular ve hareketli nesneler henüz yok, yani kapalı kapılardan geçebilirsiniz.
 - MP2 geometrisi kazılamaz. Bloklar onun üzerine ve yanına konabilir.
 - Minecraft'ın düşen eşyaları, okları, mobları ve oyuncu modeli henüz MP2 içinde çizilmiyor. Bloklar, seçim çerçevesi, el ve arayüz çiziliyor.
@@ -85,7 +95,7 @@ Paket `dist\MaxCraft-<sürüm>.zip` olarak yazılır. Script eklentiyi **x86** o
 
 Sadece eklenti için: `cd plugin`, sonra `cmake --preset x86-release` ve `cmake --build --preset x86-release`. `MAXPAYNE2_DIR` ortam değişkeni ayarlıysa `.asi` dosyası her derlemeden sonra oyun klasörüne kopyalanır.
 
-GitHub'a her push'ta Actions aynı paketi bulutta derler ve indirilebilir dosya olarak ekler.
+GitHub'a her push'ta Actions aynı paketi bulutta derler. İndirilebilir dosya **Actions artifact**'ı olarak eklenir; GitHub Releases sayfası doldurulmaz, dolayısıyla Releases'a bakmayın. Artifact'a erişmek için depoya giriş yapmış bir GitHub hesabı gerekir.
 
 ## Klasörler
 

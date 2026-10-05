@@ -65,7 +65,7 @@ MP2'nin motor DLL'leri binlerce isimli C++ fonksiyonunu dışa açar. Adres tabl
 ## 4. Kare akışı
 
 1. **`updatePrePhysics` (oyuncu):** Minecraft durumunu okur, gerekirse kalibre eder, ara sahne/ölüm kontrolü, ışınlama, fare bakışı, kukla kararı, Minecraft tick'lerinin ara değerlemesi, kamera matrisi, Minecraft olayları (vuruşlar, ölüm, patlamalar), düşman tablosu, çarpışma kuyruğu.
-2. **`updateCharacterPhysics` (oyuncu):** Minecraft Max'i yönetiyorsa atlanır.
+2. **`updateCharacterPhysics`:** **atlanmaz**, koşulsuz çağrılır. MP2 orada Max'in hangi odada olduğunu takip edip yalnızca o odadan görünen odaları çiziyor; atlandığında başka odalar siyah ya da kırık çiziliyordu. Konum `updatePostPhysics`'te ezilir.
 3. **`updatePostPhysics` (oyuncu):** Kukla açıksa Max ve phantom'u Minecraft'ın ayak konumuna ve bakış yönüne taşır.
 4. **`X_CameraImplementation::update`:** MP2'nin hesapladığı matrisin üzerine Minecraft gözü yazılır.
 5. **`IDirect3DDevice8::Present`:** Heartbeat ve SkyState yazılır (Minecraft kare hızını buna göre ayarlar), render halkası boşaltılır, bloklar MP2'nin kendi view/projection matrisleri ve derinlik tamponuyla çizilir, ardından overlay.
@@ -76,13 +76,13 @@ Oyuncu güncellemesi 250 ms gelmezse MP2 duraklatılmış veya menüde sayılır
 
 `mc = (mp × B) / unitsPerBlock`. B, MP2'nin yukarı eksenini Minecraft Y'ye taşıyan döngüsel bir permütasyon (det +1). MP2 solak (Direct3D) olduğu için Minecraft Z ayrıca ters çevrilir. Y-yukarı bir MP2 için sonuç `(x, y, −z)`.
 
-- Ölçek: Max'in kapsül boyu (uzunluk + 2r) = 1,8 blok.
+- Ölçek: `fUnitsPerBlock > 0` elle sabitlenir; `0` (kod varsayılanı) ise Max'in kapsül boyundan ölçülür: `unitsPerBlock = kapsülYüksekliği / 1,8 blok`. Ölçülen değer 0,25–4 aralığı dışındaysa reddedilir ve MaxFX'in metri korunur. Kullanılan değer ve kaynağı ("auto" / "manual") `MaxCraft.log`'a yazılır.
 - Yukarı eksen: kapsül ekseninin en büyük bileşeni.
 - İkisi de `MaxCraft.ini` ile sabitlenebilir. Kalibrasyon değişirse çarpışma yeni epoch ile baştan gönderilir.
 
 ## 6. 32-bit adres alanı
 
-SkyCraft paylaşılan belleği tek görünümde (~230 MB) eşler. Büyük adres alanı bayrağı olmayan 32-bit MP2'de bu başarısız olabilir. MaxCraft üç parça eşler: küçük yapılar ve çarpışma halkası (~32 MB), render halkası (64 MB), overlay slotlarının yalnızca ekran çözünürlüğümüzün gerektirdiği kısmı (1080p'de 3 × 8 MB). Toplam ~120 MB. Görünümler 64 KB'ye hizalanır.
+SkyCraft paylaşılan belleği tek görünümde eşler. Büyük adres alanı bayrağı olmayan 32-bit MP2'de bu başarısız olabilir. MaxCraft üç parça eşler: küçük yapılar ve çarpışma halkası (~32 MB), render halkası (64 MB), overlay slotlarının yalnızca ekran çözünürlüğümüzün gerektirdiği kısmı (1080p'de 3 × 8 MB). Toplam ~120 MB. Görünümler 64 KB'ye hizalanır. Paylaşılan belleğinin toplamı `proto::kMappingBytes` = 200.327.168 bayt (191,06 MiB); yalnızca görünümler eşlenir.
 
 ## 7. Çarpışma
 

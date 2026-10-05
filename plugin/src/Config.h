@@ -38,9 +38,15 @@ struct Config
     bool diagnostics = false;
     bool blocksNoDepth = false;    // draw Minecraft's blocks over everything
     bool blocksNoTexture = false;  // draw them untextured (vertex colour only): texture or transform?
-    // Render.cpp is what honours this, and it is the only reader: the block draws at MP2's EndScene
-    // and at Present both run unconditionally, so until it checks this field the key changes nothing.
-    bool drawAtEndScene = false;   // draw blocks at MP2's EndScene, while its depth buffer is the scene's
+    // Which moment of MP2's frame the blocks go in (Render.cpp's BlocksDrawMode() is the only reader).
+    // Every mode draws the same world pass from the same world camera; this only picks when, and the
+    // depth buffer it lands in is what decides occlusion:
+    //   0 (default) - the last moment MP2's depth buffer still holds the level: just before MP2
+    //                 clears it for its weapon, else at the end of its 3D scene, else at Present.
+    //   1           - only at the end of MP2's 3D scene, so the pass never waits on MP2 drawing a
+    //                 weapon that frame. Correct occlusion either way.
+    // BlocksNoDepth picks the third moment (always at Present, no occlusion) and stays a debug aid.
+    bool drawAtEndScene = false;
 
     static const Config& Get();
     static std::wstring GameDir();

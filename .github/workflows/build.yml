@@ -15,11 +15,17 @@ jobs:
 
       - name: Build and package
         shell: pwsh
+        # Reads the version out of plugin/CMakeLists.txt, builds MaxCraft.asi as x86 through the
+        # x86-release preset (binaryDir plugin/build/x86-release) and writes dist\MaxCraft-<version>.zip.
         run: ./tools/package.ps1
 
+      # This is the whole delivery: an Actions artifact, which needs an account to download. No GitHub
+      # Release is created, so README's link to the Releases page leads nowhere until a release job is
+      # added (gh release create on a tag) - do not describe this workflow as publishing a release.
       - uses: actions/upload-artifact@v4
         with:
           name: MaxCraft
+          if-no-files-found: error  # a renamed artifact in package.ps1 must fail the run, not ship nothing
           path: |
             dist/MaxCraft-*.zip
             plugin/build/x86-release/RelWithDebInfo/MaxCraft.pdb

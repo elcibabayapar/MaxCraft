@@ -46,6 +46,9 @@ namespace
     bool g_rotationProbed = false;
     Matrix4x3 g_renderCamera{};
     DWORD     g_renderCameraTick = 0;
+    // A level is loaded and its state (characters, collision epoch, the probe below) has been reset.
+    // Cleared by nothing: it is what keeps the hundreds of inits per level down to one reset.
+    bool g_levelStarted = false;
 
     bool Orthonormal(const float* r)
     {
@@ -86,20 +89,38 @@ namespace
         return g_origMatrix(self);
     }
 
+    // Everything a level owns: the characters, the collision epoch and the camera probes. Both level
+    // hooks below call it, because either one alone is not enough - see InitLevel.
+    void ResetLevelState()
+    {
+        characters::OnLevelChange();  // clears the characters, bumps levelId and the collision epoch
+        g_viewconeMode = ViewconeMode::kUnknown;
+        g_rotationProbed = false;
+        g_rotationOffset = 0;
+        g_renderCameraTick = 0;  // the captured camera belongs to the level that just went away
+        collision::ClearGeometry();
+    }
+
     void __fastcall InitLevel(X_CameraImplementation* self, void*, const X_LevelRuntimeRoomContainer* rooms)
     {
-        mclog::Info("level init");
+        // initLevel is called hundreds of times per level (every room container, and again on re-entry),
+        // so the reset is guarded to the first one: it must be exactly one reset per level, never
+        // hundreds of epoch bumps with the actors cleared in between. A level that is entered without
+        // a deinit before it (MP2 loads straight into the next one) would otherwise inherit the old
+        // level's collision epoch, and Minecraft would keep colliding with a level it has left.
+        if (!g_levelStarted) {
+            g_levelStarted = true;
+            ResetLevelState();
+            mclog::Info("level init: characters cleared, streaming collision from epoch {}", State().epoch);
+        }
         g_origInit(self, rooms);
     }
 
     void __fastcall DeinitLevel(X_CameraImplementation* self, void*)
     {
         mclog::Info("level deinit");
-        characters::OnLevelChange();
-        g_viewconeMode = ViewconeMode::kUnknown;
-        g_rotationProbed = false;
-        g_rotationOffset = 0;
-        collision::ClearGeometry();
+        ResetLevelState();
+        g_levelStarted = true;  // the init that follows belongs to the level just reset
         g_origDeinit(self);
     }
 
@@ -246,7 +267,11 @@ const void* camera::Target()
 
 bool camera::RenderCamera(mp2::Matrix4x3& out)
 {
-    if (!g_renderCameraTick || GetTickCount() - g_renderCameraTick > 1000)
+    // Staleness on the same threshold as everything else that asks whether MP2 is still ticking
+    // (characters::kPausedMs): this matrix is only refreshed while MP2 renders its own camera, so
+    // past that point it is a frozen frame. A longer window here drew blocks from a camera the rest
+    // of the mod had already stopped believing in.
+    if (!g_renderCameraTick || GetTickCount() - g_renderCameraTick > characters::kPausedMs)
         return false;
     out = g_renderCamera;
     return true;

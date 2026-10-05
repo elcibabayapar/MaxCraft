@@ -29,7 +29,6 @@ namespace
 {
     constexpr double kDegToRad = 0.017453292519943295;
     constexpr DWORD  kStaleMs = 2000;
-    constexpr DWORD  kPausedMs = 250;  // no player update for this long: MP2 is paused / in a menu
 
     using UpdateFn = void(__thiscall*)(X_Character*, const X_TimeUpdate&);
     using PhysicsFn = void(__thiscall*)(X_Character*, float, P_Camera*);
@@ -50,8 +49,9 @@ namespace
     {
         std::uint32_t id;
         DWORD         lastSeen;
-        float         height;  // blocks (from the capsule), 0 until measured
+        float         height;      // blocks (from the capsule), 0 until measured
         std::string   name;
+        float         healthFrac;  // 0..1, the last fraction that could actually be read (1 until then)
     };
     std::unordered_map<X_Character*, Tracked> g_chars;
     std::uint32_t                             g_nextId = 1;
@@ -75,12 +75,11 @@ namespace
     DWORD         g_lastBorderTeleport = 0;
     bool          g_keepLook = false;
     bool          g_playerByCamera = false;  // found through MP2's camera target
-    bool          g_playerNamed = false;     // fallback pick has a Max / Mona skin
     DWORD         g_lastStatusLog = 0;
 
     Tracked& Track(X_Character* c)
     {
-        auto [it, isNew] = g_chars.try_emplace(c, Tracked{ g_nextId, 0, 0.0f, {} });
+        auto [it, isNew] = g_chars.try_emplace(c, Tracked{ g_nextId, 0, 0.0f, {}, 1.0f });
         if (isNew) {
             ++g_nextId;
             it->second.name = SkinNameOf(c);
@@ -105,6 +104,16 @@ namespace
         return result;
     }
 
+    // MP2's skins name the characters we care about: Max ("MaxPayne..."), Mona ("Mona..."), and enemy
+    // props that reuse those names ("...Enemy..."). Both the candidate being tested and the character
+    // currently in charge go through this one predicate: read two ways, a "Mona...Enemy..." skin
+    // matched one and not the other, and `named && !currentNamed` then handed the player to an
+    // enemy and refused to hand it back.
+    bool LooksLikePlayer(const std::string& name)
+    {
+        return (name.find("MaxPayne") != std::string::npos || name.find("Mona") != std::string::npos) && name.find("Enemy") == std::string::npos;
+    }
+
     // The character's feet in Minecraft coordinates.
     bool FeetOf(X_Character* c, McPoint& out, float* yaw = nullptr)
     {
@@ -121,21 +130,34 @@ namespace
         return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
     }
 
-    float HealthFrac(X_Character* c)
+    // Health read, and whether there was one. The bindings are guesses on a guessed object, so a
+    // character MP2 is halfway through destroying faults here; -1.0f used to stand for that, and a
+    // -1.0f compared as health passes every "did it go down" test, which is how one fault used to
+    // reach setDead. A failed read is no value at all, so a caller that needs one has to decide.
+    bool TryHealth(X_Character* c, float& out)
     {
-        float frac = 0.0f;
-        Guarded([&] {
-            const float max = api.getMaximumHealth(c);
-            frac = max > 0.0f ? std::clamp(api.getHealth(c) / max, 0.0f, 1.0f) : 0.0f;
-        });
-        return frac;
+        float h = 0.0f;
+        if (Guarded([&] { h = api.getHealth(c); }) && std::isfinite(h)) {
+            out = h;
+            return true;
+        }
+        return false;
     }
 
-    float HealthOf(X_Character* c)
+    // Health as 0..1 for the actor table. False when MP2 would not answer, `out` untouched then: the
+    // caller keeps the fraction it read last frame, because the failure returning 0.0f wrote every
+    // enemy to Minecraft as a corpse.
+    bool HealthFrac(X_Character* c, float& out)
     {
-        float h = -1.0f;
-        Guarded([&] { h = api.getHealth(c); });
-        return h;
+        float max = 0.0f;
+        Guarded([&] { max = api.getMaximumHealth(c); });
+        if (!(max > 0.0f) || !std::isfinite(max))
+            return false;
+        float now = 0.0f;
+        if (!TryHealth(c, now))
+            return false;
+        out = std::clamp(now / max, 0.0f, 1.0f);
+        return true;
     }
 
     // A Minecraft hit on an MP2 character. MP2's own damage paths come first (hit reactions, death
@@ -144,10 +166,22 @@ namespace
     void Damage(X_Character* target, float amount)
     {
         static int logged = 0;
-        const float before = HealthOf(target);
+        float       before = 0.0f;
         const char* how = "causeDamage";
+        const bool  haveBefore = TryHealth(target, before);
+        // "Did it work": 1 health went down, 0 it did not, -1 health cannot be read at all. Every
+        // tier below is picked by that answer, so -1 has to mean "stop here" and not "unchanged":
+        // the last tier writes health and calls setDead, and a single unreadable read on the way must
+        // never be enough to reach it.
+        auto        took = [&] {
+            float now = 0.0f;
+            if (!haveBefore || !TryHealth(target, now))
+                return -1;
+            return now < before - 1e-4f ? 1 : 0;
+        };
         Guarded([&] { g_origDamage(target, amount, 1.0f, 0, State().player, nullptr); });
-        if (HealthOf(target) >= before - 1e-4f) {
+        int         step = took();
+        if (step == 0) {
             how = "explosionDamage";
             Guarded([&] {
                 Vec3 at{};
@@ -156,8 +190,9 @@ namespace
                 if (source)
                     api.explosionDamage(target, source, amount, at, 0, false, false);
             });
+            step = took();
         }
-        if (HealthOf(target) >= before - 1e-4f) {
+        if (step == 0) {
             how = "health";
             const float left = (std::max)(0.0f, before - amount);
             Guarded([&] { api.setHealth(api.accessCharacterProperties(target), left); });
@@ -166,10 +201,18 @@ namespace
                 Guarded([&] { api.knockOver(target); });
                 Guarded([&] { g_origSetDead(target, true); });
             }
+        } else if (step < 0) {
+            // MP2's own damage path already ran and needs no health value; the fallbacks do, so they
+            // are skipped rather than guessed. logged < 12 keeps this to a few lines per session.
+            how = haveBefore ? "causeDamage (health became unreadable: fallbacks skipped)" : "causeDamage (health unreadable: fallbacks skipped)";
         }
         if (logged < 12) {
             ++logged;
-            mclog::Info("damage: {:.1f} to {:p} via {}: health {:.1f} -> {:.1f}", amount, static_cast<void*>(target), how, before, HealthOf(target));
+            float after = 0.0f;
+            if (TryHealth(target, after))
+                mclog::Info("damage: {:.1f} to {:p} via {}: health {:.1f} -> {:.1f}", amount, static_cast<void*>(target), how, before, after);
+            else
+                mclog::Info("damage: {:.1f} to {:p} via {}: health {:.1f} -> unreadable", amount, static_cast<void*>(target), how, before);
         }
     }
 
@@ -187,8 +230,11 @@ namespace
                     Guarded([&] { max = api.getMaximumHealth(c); });
                     const float amount = ev.a / 20.0f * max * cfg.enemyDamageScale;
                     Damage(c, amount);
-                    if (cfg.diagnostics)
-                        mclog::Info("hit #{} for {:.1f} MC -> {:.2f} MP2 (hp now {:.0f}%)", ev.formId, ev.a, amount, HealthFrac(c) * 100.0f);
+                    if (cfg.diagnostics) {
+                        float hp = 0.0f;
+                        mclog::Info("hit #{} for {:.1f} MC -> {:.2f} MP2 (hp now {})", ev.formId, ev.a, amount,
+                                    HealthFrac(c, hp) ? std::format("{:.0f}%", hp * 100.0f) : std::string("unreadable"));
+                    }
                 }
                 break;
             case proto::kEvPlayerDied:
@@ -262,7 +308,10 @@ namespace
             r.yaw = yaw;
             r.width = 0.6f;
             r.height = t.height;
-            r.healthFrac = HealthFrac(c);
+            // Out is the entry itself, so a read that fails leaves last frame's fraction standing:
+            // publishing 0.0f instead would tell Minecraft every actor it can see is a corpse.
+            HealthFrac(c, t.healthFrac);
+            r.healthFrac = t.healthFrac;
             r.level = 10;
             strncpy_s(r.name, t.name.c_str(), _TRUNCATE);
             records.push_back(r);
@@ -329,7 +378,6 @@ namespace
     {
         auto&       st = State();
         auto&       link = Link::Get();
-        const auto& cfg = Config::Get();
         const DWORD nowTick = GetTickCount();
         const float delta = g_lastFrameTick ? (std::min)((nowTick - g_lastFrameTick) / 1000.0f, 0.25f) : 0.016f;
         g_lastFrameTick = nowTick;
@@ -472,7 +520,6 @@ namespace
         WriteActors();
         if (st.haveMc && map.Calibrated())
             collision::Update(puppet ? McPoint{ st.mc.x, st.mc.y, st.mc.z } : g_playerMc);
-        (void)cfg;
     }
 
     // Minecraft's feet -> Max, after MP2's own physics (which we skipped) so nothing overrides it.
@@ -519,12 +566,9 @@ namespace
         // Max around (and reads the wrong character's feet), which resyncs Minecraft forever.
         if (self != st.player && !st.minecraftOwnsPlayer) {
             const auto&        name = g_chars[self].name;
-            const bool         named = (name.find("MaxPayne") != std::string::npos || name.find("Mona") != std::string::npos) &&
-                               name.find("Enemy") == std::string::npos;
-            const bool currentNamed = known != g_chars.end() &&
-                                      (known->second.name.find("MaxPayne") != std::string::npos ||
-                                       (known->second.name.find("Mona") != std::string::npos && known->second.name.find("Enemy") == std::string::npos));
-            const bool maySteal = stale || (named && !currentNamed);
+            const bool         named = LooksLikePlayer(name);
+            const bool         currentNamed = known != g_chars.end() && LooksLikePlayer(known->second.name);
+            const bool         maySteal = stale || (named && !currentNamed);
             if (followed && !camera::PathActive()) {
                 if (maySteal) {
                     st.player = self;
@@ -533,7 +577,6 @@ namespace
                 }
             } else if (!g_playerByCamera && maySteal && IsPlayerCandidate(self)) {
                 st.player = self;
-                g_playerNamed = named;
                 mclog::Info("player is #{} ({}): input-driven, AI off", g_chars[self].id, name);
             }
         }
@@ -651,13 +694,26 @@ void characters::OnLevelChange()
     auto& st = State();
     g_chars.clear();
     st.player = nullptr;
-    g_playerByCamera = g_playerNamed = false;
+    g_playerByCamera = false;
     st.puppeting = false;
     st.minecraftOwnsPlayer = false;
     st.gameOwnsInput = true;
     st.cameraValid = false;
     g_haveLastSet = false;
     g_teleportPending = true;
+    // Belongs to the level that just went away, and nothing here may act on it: "Minecraft is still
+    // arriving" (so a fresh teleport's 8 s timeout is inherited and never fires), "Minecraft's player
+    // is outside the level" (so the first frame of the new level yanks it back to a position in the
+    // old one) and "keep the look direction" (which would apply the old level's yaw to the new one).
+    g_arrivingFor = 0.0f;
+    g_outsideLevel = false;
+    g_lastBorderTeleport = 0;
+    g_keepLook = false;
+    // g_teleportSeq stays: Minecraft matches SkyState::teleportSeq against the last one it applied,
+    // so it has to keep climbing across levels. g_nextId stays for the same reason (ids are handed to
+    // Minecraft and remembered there). g_lastMcPid and g_mcWasAlive stay: they track the Minecraft
+    // process, not the level, and zeroing them would make every level change look like a reconnect
+    // (a second epoch bump and a "Minecraft connected" line that never happened).
     ++st.levelId;
     collision::Reset(++st.epoch);
     Link::Get().WriteActors(nullptr, 0);

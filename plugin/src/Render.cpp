@@ -89,6 +89,9 @@ namespace
     UINT   g_trianglesDrawn = 0;
     bool   g_ownDraw = false;  // our own SetTransform / SetRenderState calls pass straight through
     bool   g_perspectiveActive = false;
+    bool   g_noWvpLogged = false;  // one line, so the diagnostic setting says itself in the log
+    bool   g_noViewLogged = false;
+    bool   g_noBlockLogged = false;
     // For vertex-shader draws (skinned characters): MP2's projection, its inverse, and the camera
     // correction inverse(mp2View) * ourView of this frame.
     Matrix g_mp2Proj{}, g_mp2ProjInverse{}, g_correction{};
@@ -1159,6 +1162,17 @@ namespace
     // draws as usual.
     bool ReadyForBlocks()
     {
+        // TEMPORARY DIAGNOSTIC: bNoBlockDraw=1 stops every block draw (all three moments go through
+        // here), so a user can tell "the crash is in the block pass" from "it is in the matrix
+        // replacement the block pass relies on". Blocks simply do not appear while it is set.
+        static const bool kNoBlockDraw = Config::Get().noBlockDraw;
+        if (kNoBlockDraw) {
+            if (!g_noBlockLogged) {
+                g_noBlockLogged = true;
+                mclog::Info("render: block drawing DISABLED by bNoBlockDraw=1 (diagnostic)");
+            }
+            return false;
+        }
         const Runtime& st = State();
         const bool      haveCamera = HaveBlocksCamera(st);
         if (!haveCamera)
@@ -1565,6 +1579,16 @@ namespace
         const Runtime& st = State();
         if (g_ownDraw || !data || count < 4 || count > 96 || !st.cameraValid || !g_haveCorrection || !g_haveProjInverse)
             return g_origSetVsConstant(device, reg, data, count);
+        // TEMPORARY DIAGNOSTIC: the WVP fixup is disabled to isolate whether the menu-to-3D crash is
+        // this path or the transform replacement. When set to 1 the call passes straight through.
+        static const bool kDisableWvpFixup = Config::Get().noWvpFixup;
+        if (kDisableWvpFixup) {
+            if (!g_noWvpLogged) {
+                g_noWvpLogged = true;
+                mclog::Info("render: WVP fixup DISABLED by bNoWvpFixup=1 (diagnostic)");
+            }
+            return g_origSetVsConstant(device, reg, data, count);
+        }
         static float buffer[96 * 4];
         std::memcpy(buffer, data, count * 16);
         bool changed = false;
@@ -1597,6 +1621,22 @@ namespace
     {
         if (g_ownDraw || !matrix)
             return g_origSetTransform(device, state, matrix);
+
+        // TEMPORARY DIAGNOSTIC: pass every transform straight through, to isolate the menu-to-3D
+        // crash from the camera replacement. bNoViewFixup=1 in MaxCraft.ini [Debug].
+        static const bool kDisableViewFixup = Config::Get().noViewFixup;
+        if (kDisableViewFixup) {
+            if (!g_noViewLogged) {
+                g_noViewLogged = true;
+                mclog::Info("render: view/world replacement DISABLED by bNoViewFixup=1 (diagnostic)");
+            }
+            // Still record what MP2 set, so the log shows which matrix was in play.
+            if (state == kTsView)
+                g_stViewIdentity = IsIdentity(*matrix);
+            else if (state == kTsProjection)
+                g_stPerspective = matrix->m[2][3] != 0.0f && matrix->m[3][3] == 0.0f;
+            return g_origSetTransform(device, state, matrix);
+        }
 
         // MP2 draws in two ways: most of the scene with a real view matrix, and some objects
         // (doors, props...) with an identity view and the camera baked into their world matrix.

@@ -97,6 +97,9 @@ const Config& Config::Get()
         c.blocksNoDepth = ReadInt(ini, L"Debug", L"bBlocksNoDepth", 0) != 0;
         c.blocksNoTexture = ReadInt(ini, L"Debug", L"bBlocksNoTexture", 0) != 0;
         c.drawAtEndScene = ReadInt(ini, L"Debug", L"bDrawAtEndScene", 0) != 0;
+        c.noViewFixup = ReadInt(ini, L"Debug", L"bNoViewFixup", 0) != 0;
+        c.noWvpFixup = ReadInt(ini, L"Debug", L"bNoWvpFixup", 0) != 0;
+        c.noBlockDraw = ReadInt(ini, L"Debug", L"bNoBlockDraw", 0) != 0;
         return c;
     }();
     return config;

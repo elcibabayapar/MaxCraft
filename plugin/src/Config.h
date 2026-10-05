@@ -38,6 +38,16 @@ struct Config
     bool diagnostics = false;
     bool blocksNoDepth = false;    // draw Minecraft's blocks over everything
     bool blocksNoTexture = false;  // draw them untextured (vertex colour only): texture or transform?
+    // TEMPORARY diagnostics for the menu-to-3D crash (Windows logs it as "unknown module,
+    // 0x001aface"; nothing throws, so the vectored handler sees nothing). Each stops one render
+    // path that hands MP2 a matrix of ours, so a user can tell which one is at fault:
+    //   noViewFixup - pass SetTransform through (camera no longer follows Minecraft's eye)
+    //   noWvpFixup  - pass SetVertexShaderConstant through (skinned characters keep MP2's own matrices)
+    //   noBlockDraw - draw no Minecraft blocks at all
+    // All three off = the mod is fully active. Each says itself once in MaxCraft.log.
+    bool noViewFixup = false;
+    bool noWvpFixup = false;
+    bool noBlockDraw = false;
     // Which moment of MP2's frame the blocks go in (Render.cpp's BlocksDrawMode() is the only reader).
     // Every mode draws the same world pass from the same world camera; this only picks when, and the
     // depth buffer it lands in is what decides occlusion:

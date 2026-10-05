@@ -422,9 +422,17 @@ namespace
         }
         // Give the big buffer back so the next room's capture reuses its memory instead of
         // reallocating a fresh one for every streamed room.
+        //
+        // Only when nothing was captured while we were indexing. Capture() appends to g_mpTris under
+        // this same mutex, and it runs on the game thread during level loading, which is exactly when
+        // a rebuild happens - so the vector is usually NOT empty here. Swapping a populated g_mpTris
+        // would move those just-captured triangles into `fresh`, which dies with this scope: whole
+        // rooms would vanish from the index, and the batch we just indexed would sit in g_mpTris to
+        // be taken and appended to g_workerTris a second time on the next rebuild. Both are silent,
+        // and the duplication compounds once per streamed room.
         {
             std::lock_guard lock(g_geoMutex);
-            if (g_mpTris.capacity() < fresh.capacity())
+            if (g_mpTris.empty() && g_mpTris.capacity() < fresh.capacity())
                 g_mpTris.swap(fresh);
         }
         mclog::Info("collision index: {} triangles in {} regions (epoch {})", index.tris.size(), index.regions.size(), epoch);

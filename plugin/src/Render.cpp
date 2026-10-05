@@ -103,6 +103,19 @@ namespace
     ProjUse g_frameProj[4]{};
     UINT    g_frameProjCount = 0;
 
+    // SetTransform's per-scene state. These were function-static locals inside SetTransform, which
+    // meant a new frame's first draw read the PREVIOUS scene's values: MP2's menu (identity view, no
+    // perspective) and its 3D scene share one code path, so the menu's "identity view" flag survived
+    // into the first 3D frame. MP2's opening SetTransform(WORLD) was then mistaken for a world matrix
+    // needing the camera correction, and the vertex-shader constant path multiplied a matrix computed
+    // for one scene into MP2's skinned-character shaders - a garbage transform in a vertex buffer,
+    // which is the crash Windows logs as "unknown module, 0x001aface". As globals they can be reset
+    // per scene instead.
+    bool   g_stPerspective = false;   // MP2 has set a perspective projection this scene
+    bool   g_stViewIdentity = false;  // MP2's last view matrix was the identity
+    Matrix g_stCorrection{};          // inverse(mp2View) * ourView, from that view
+    bool   g_stHaveCorrection = false;
+
     void NoteSceneProjection()
     {
         for (UINT i = 0; i < g_frameProjCount; ++i)
@@ -133,6 +146,15 @@ namespace
     }
     bool   g_haveProjInverse = false, g_haveCorrection = false;
     UINT   g_constantsMoved = 0;
+    // Reset the per-scene state above. Separate function so BeginSceneHook (further down) and Present
+    // (further down still) can both call it; declared here, next to what it clears.
+    void ResetSceneTransformState()
+    {
+        g_stPerspective = false;
+        g_stViewIdentity = false;
+        g_stHaveCorrection = false;
+        g_haveCorrection = false;
+    }
     // Whether this scene (BeginScene..EndScene) saw a perspective projection: MP2's 3D world does,
     // its HUD scenes do not. Blocks drawn at EndScene only after a 3D scene.
     bool g_sceneHadPerspective = false;
@@ -1105,8 +1127,22 @@ namespace
     {
         g_sceneHadPerspective = false;
         g_depthClearedThisScene = false;
+        g_drawsSinceClear = 0;
+        // Clear the projection table here, not only at Present: the scene hooks (ClearHook,
+        // EndSceneHook) run BETWEEN BeginScene and the next Present. Without this clear, g_frameProj
+        // still holds the projection MP2 used in the PREVIOUS scene (a menu, a cut-scene), and
+        // SceneProjection() hands it to DrawWorld. When the menu-to-3D transition draws the blocks
+        // with the menu's orthographic or widescreen projection into the world depth buffer, the
+        // vertex-shader constant fixup multiplies by the wrong matrix and MP2 dereferences a bad
+        // pointer - the crash that shows as "unknown module, 0x001aface" in Windows events.
+        // A fresh BeginScene is exactly the boundary MP2 sets its projection after.
+        g_frameProjCount = 0;
+        g_frameSceneDraws = 0;
+        ResetSceneTransformState();
         return g_origBeginScene(device);
     }
+
+    
 
     // Everything the scene has to have done before the blocks can be drawn into it, whatever moment
     // of the scene that is. The mode is not part of it: which moment may be used is the hooks' call.
@@ -1328,6 +1364,18 @@ namespace
         g_drawsSinceClear = 0;
         g_frameProjCount = 0;
         g_blocksDrawnThisFrame = false;
+        // The scene state SetTransform tracks lives in function-static locals (perspective,
+        // viewIsIdentity, haveCorrection). They describe the scene MP2 drew LAST frame, and a new
+        // frame does not necessarily start with a SetTransform before its first draw: MP2's menu and
+        // its 3D scene use the same code path, so the menu's "identity view, no projection" state
+        // survived into the first 3D frame. There, MP2's first SetTransform(WORLD) was taken as a
+        // world matrix to move with correction - a matrix computed for a different scene - and the
+        // vertex-shader constant fixup then multiplied that into MP2's skinned-character shaders. The
+        // result is a vertex buffer fed a garbage matrix, which is the crash Windows logs as
+        // "unknown module, 0x001aface". Resetting here means every frame starts from "no scene seen
+        // yet" rather than from the previous frame's leftovers.
+        g_haveCorrection = false;
+        g_haveProjInverse = false;
         return g_origPresent(device, src, dst, window, dirty);
     }
 
@@ -1554,46 +1602,43 @@ namespace
         // (doors, props...) with an identity view and the camera baked into their world matrix.
         // The first gets Minecraft's eye as its view; the second gets its world matrix moved from
         // MP2's camera to ours: world * inverse(mp2View) * ourView.
-        static bool   perspective = false;
-        static bool   viewIsIdentity = false;
-        static Matrix ours{}, correction{}, corrected{};
-        static bool   haveCorrection = false;
+        static Matrix ours{}, corrected{};
         const Runtime& st = State();
 
         if (state == kTsView) {
             ++g_viewSets;
-            viewIsIdentity = IsIdentity(*matrix);
-            if (!viewIsIdentity && perspective)
+            g_stViewIdentity = IsIdentity(*matrix);
+            if (!g_stViewIdentity && g_stPerspective)
                 NoteSceneDraw();
-            if (st.cameraValid && !viewIsIdentity) {
+            if (st.cameraValid && !g_stViewIdentity) {
                 Matrix unusedProj{};
                 ComputeCamera(st, ours, unusedProj, 16, 9);
-                correction = Multiply(RigidInverse(*matrix), ours);
-                haveCorrection = true;
-                g_correction = correction;
+                g_stCorrection = Multiply(RigidInverse(*matrix), ours);
+                g_stHaveCorrection = true;
+                g_correction = g_stCorrection;
                 g_haveCorrection = true;
                 matrix = &ours;
                 ++g_viewReplaced;
             }
-        } else if (state == kTsWorld && viewIsIdentity && perspective) {
+        } else if (state == kTsWorld && g_stViewIdentity && g_stPerspective) {
             NoteSceneDraw();
-            if (st.cameraValid && haveCorrection) {
-                corrected = Multiply(*matrix, correction);
+            if (st.cameraValid && g_stHaveCorrection) {
+                corrected = Multiply(*matrix, g_stCorrection);
                 matrix = &corrected;
                 ++g_worldCorrected;
             }
         }
         if (!st.cameraValid)
-            haveCorrection = g_haveCorrection = false;
+            g_stHaveCorrection = g_haveCorrection = false;
 
         // The projection is the only matrix of MP2's the blocks take: the view is rotation-only
         // (see the correction above) and is rebuilt from Minecraft's eye by DrawWorld every frame.
         if (state == kTsProjection) {
-            perspective = matrix->m[2][3] != 0.0f && matrix->m[3][3] == 0.0f;
-            g_perspectiveActive = perspective;
-            if (perspective)
+            g_stPerspective = matrix->m[2][3] != 0.0f && matrix->m[3][3] == 0.0f;
+            g_perspectiveActive = g_stPerspective;
+            if (g_stPerspective)
                 g_sceneHadPerspective = true;
-            if (perspective) {
+            if (g_stPerspective) {
                 g_proj = *matrix;
                 g_haveProj = true;
                 // g_mp2Proj and its inverse are the correction's own pair, so they must follow the

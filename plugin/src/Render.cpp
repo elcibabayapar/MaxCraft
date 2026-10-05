@@ -1564,11 +1564,47 @@ namespace
     }
 
     // M = world * view * proj  =>  M * inverse(proj) is affine (last column 0, 0, 0, 1).
+    //
+    // Affineness on its own is a shape test, not an identity test: it says nothing about whether the
+    // three rows above it are a rotation. It was suspected of letting a light, texture or skinning
+    // matrix through and feeding MP2's vertex shader a garbage transform, which is the shape of the
+    // menu-to-3D crash (Windows reports that as "unknown module, 0x001aface", nothing thrown).
+    //
+    // Measured, though, that suspicion does not hold: the loose test rejects every such matrix that
+    // was tried, because multiplying by the inverse projection moves the offending columns and they
+    // stop being affine. So this tightening is a hardening measure, NOT the crash fix, and is not
+    // claimed to be one. What it does buy is that a fixed-up matrix is now required to carry a
+    // plausible rotation basis, so a matrix that merely happens to look affine can no longer be
+    // rewritten with the camera correction.
+    //
+    // The second half is also a guard against the arithmetic itself: NaN and Inf fail the length and
+    // dot tests (every comparison with them is false), so a non-finite matrix cannot be rewritten
+    // either, where before only its last column was checked and NaN there slipped through.
+    //
+    // Tolerances are loose on purpose. MP2 scales some models, so a rotation row may be longer or
+    // shorter than unit; 0.25..4 on the squared length accepts a scale of 0.5 to 2, and the dot
+    // threshold of 0.1 admits a little numerical drift without admitting a shear or a reflection.
     bool LooksLikeWorldViewProj(const Matrix& m, Matrix& worldView)
     {
         worldView = Multiply(m, g_mp2ProjInverse);
-        return std::fabs(worldView.m[0][3]) < 1e-3f && std::fabs(worldView.m[1][3]) < 1e-3f && std::fabs(worldView.m[2][3]) < 1e-3f &&
-               std::fabs(worldView.m[3][3] - 1.0f) < 1e-3f;
+        if (!(std::fabs(worldView.m[0][3]) < 1e-3f && std::fabs(worldView.m[1][3]) < 1e-3f && std::fabs(worldView.m[2][3]) < 1e-3f &&
+              std::fabs(worldView.m[3][3] - 1.0f) < 1e-3f))
+            return false;
+        // Rotation rows: each of unit length within the tolerance above, and mutually orthogonal.
+        // Row-vector convention, so rows 0..2 are the basis. Non-finite entries land here too and
+        // fail, because a comparison against NaN or Inf is always false.
+        for (int i = 0; i < 3; ++i) {
+            const float len2 = worldView.m[i][0] * worldView.m[i][0] + worldView.m[i][1] * worldView.m[i][1] + worldView.m[i][2] * worldView.m[i][2];
+            if (!(len2 > 0.25f && len2 < 4.0f))
+                return false;
+            for (int j = i + 1; j < 3; ++j) {
+                const float dot = worldView.m[i][0] * worldView.m[j][0] + worldView.m[i][1] * worldView.m[j][1] +
+                                  worldView.m[i][2] * worldView.m[j][2];
+                if (std::fabs(dot) > 0.1f)
+                    return false;
+            }
+        }
+        return true;
     }
 
     using SetVsConstantFn = HRESULT(__stdcall*)(void*, DWORD, const void*, DWORD);
@@ -1577,6 +1613,10 @@ namespace
     HRESULT __stdcall SetVertexShaderConstant(void* device, DWORD reg, const void* data, DWORD count)
     {
         const Runtime& st = State();
+        // count is D3D8's register count and each register is a float4, so the payload is
+        // count * 16 bytes. buffer holds 96 * 4 floats = 96 registers exactly, so the bound has to be
+        // on the register count, not on bytes. Nothing here reads past data: every access is inside
+        // the first `count` registers, and the loop only ever touches offsets where i + 4 <= count.
         if (g_ownDraw || !data || count < 4 || count > 96 || !st.cameraValid || !g_haveCorrection || !g_haveProjInverse)
             return g_origSetVsConstant(device, reg, data, count);
         // TEMPORARY DIAGNOSTIC: the WVP fixup is disabled to isolate whether the menu-to-3D crash is
@@ -1589,7 +1629,20 @@ namespace
             }
             return g_origSetVsConstant(device, reg, data, count);
         }
-        static float buffer[96 * 4];
+        // thread_local, not static: MP2 draws from more than one thread (the render thread and whatever
+        // thread it flushes from), and a shared buffer would have one thread's matrix overwritten by
+        // another's between the memcpy and the fixup. The guard below covers re-entry on the same
+        // thread, which a re-entrant D3D call would cause; without it, an inner call would reset
+        // `changed` and the outer one would hand MP2 a half-rewritten block.
+        thread_local bool          inFixup = false;
+        static thread_local float buffer[96 * 4];
+        if (inFixup)
+            return g_origSetVsConstant(device, reg, data, count);
+        struct Guard
+        {
+            bool& flag;
+            ~Guard() { flag = false; }
+        } guard{ inFixup };
         std::memcpy(buffer, data, count * 16);
         bool changed = false;
         for (DWORD i = 0; i + 4 <= count;) {
